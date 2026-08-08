@@ -549,6 +549,52 @@ async fn in_memory_graph_writer_upserts_every_node_edge_and_rule_type() {
 }
 
 #[tokio::test]
+async fn in_memory_graph_writer_upsert_twice_same_key_is_idempotent() {
+    // Arrange
+    let writer = InMemoryGraphWriter::default();
+    let sg_rules = vec![allow_all_sg_rule(Direction::Egress)];
+    let nacl_rules = vec![nacl_rule(100, Direction::Ingress, Action::Allow)];
+    let egress_batch = [SgRuleBatch {
+        security_group_id: "sg-0example",
+        rules: &sg_rules,
+    }];
+    let has_rules_batch = [NaclRuleBatch {
+        network_acl_id: "acl-0example",
+        rules: &nacl_rules,
+    }];
+    let eni = sample_eni();
+    let has_sg_edge = [HasSgEdge {
+        eni_id: "eni-0example".to_string(),
+        security_group_id: "sg-0example".to_string(),
+    }];
+
+    // Act: upsert the same eni, HAS_SG edge, and rule batch twice.
+    for _ in 0..2 {
+        writer
+            .upsert_enis(std::slice::from_ref(&eni))
+            .await
+            .expect("ENI upsert succeeds");
+        writer
+            .upsert_has_sg_edges(&has_sg_edge)
+            .await
+            .expect("HAS_SG upsert succeeds");
+        writer
+            .upsert_allows_egress_rules(&egress_batch)
+            .await
+            .expect("ALLOWS_EGRESS upsert succeeds");
+        writer
+            .upsert_has_rules(&has_rules_batch)
+            .await
+            .expect("HAS_RULE upsert succeeds");
+    }
+
+    // Assert: the second, duplicate-key upsert created no duplicates.
+    assert_eq!(writer.node_count(), 1);
+    assert_eq!(writer.edge_count(), 1);
+    assert_eq!(writer.rule_count(), 2);
+}
+
+#[tokio::test]
 async fn static_resolver_unknown_cross_account_reference_returns_unresolved_not_error() {
     // Arrange
     let mut resolutions = HashMap::new();
@@ -567,6 +613,29 @@ async fn static_resolver_unknown_cross_account_reference_returns_unresolved_not_
         ResolvedReference {
             security_group_id: "sg-cross-account-unknown".to_string(),
             resolved: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn static_resolver_known_local_reference_returns_resolved() {
+    // Arrange
+    let mut resolutions = HashMap::new();
+    resolutions.insert("sg-local-example".to_string(), true);
+    let resolver = StaticResolver { resolutions };
+
+    // Act
+    let result = resolver
+        .resolve_security_group_reference("sg-local-example")
+        .await
+        .expect("a known local reference resolves successfully");
+
+    // Assert
+    assert_eq!(
+        result,
+        ResolvedReference {
+            security_group_id: "sg-local-example".to_string(),
+            resolved: true,
         }
     );
 }
@@ -593,6 +662,62 @@ async fn evaluator_sg_allows_but_nacl_denies_returns_not_reachable() {
 
     // Assert
     assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn evaluator_sg_and_nacl_both_allow_returns_reachability_finding() {
+    // Arrange
+    let evaluator = IntersectionEvaluator;
+    let candidate = PathCandidate {
+        source: "eni-0example".to_string(),
+        destination_boundary: "boundary-pci-prod".to_string(),
+        hops: sample_hops(),
+        security_group_egress_rules: vec![allow_all_sg_rule(Direction::Egress)],
+        security_group_ingress_rules: vec![allow_all_sg_rule(Direction::Ingress)],
+        nacl_egress_rules: vec![nacl_rule(100, Direction::Egress, Action::Allow)],
+        nacl_ingress_rules: vec![nacl_rule(100, Direction::Ingress, Action::Allow)],
+    };
+
+    // Act
+    let result = evaluator
+        .evaluate(&candidate)
+        .await
+        .expect("evaluation succeeds");
+
+    // Assert
+    assert_eq!(
+        result,
+        Some(ReachabilityFinding {
+            computed_at: "2026-08-08T00:00:00Z".to_string(),
+            source: "eni-0example".to_string(),
+            destination_boundary: "boundary-pci-prod".to_string(),
+            path_evidence: PathEvidence {
+                hops: sample_hops(),
+            },
+            severity: Severity::High,
+        })
+    );
+}
+
+#[tokio::test]
+async fn evaluator_empty_path_returns_empty_path_error() {
+    // Arrange
+    let evaluator = IntersectionEvaluator;
+    let candidate = PathCandidate {
+        source: "eni-0example".to_string(),
+        destination_boundary: "boundary-pci-prod".to_string(),
+        hops: Vec::new(),
+        security_group_egress_rules: vec![allow_all_sg_rule(Direction::Egress)],
+        security_group_ingress_rules: vec![allow_all_sg_rule(Direction::Ingress)],
+        nacl_egress_rules: vec![nacl_rule(100, Direction::Egress, Action::Allow)],
+        nacl_ingress_rules: vec![nacl_rule(100, Direction::Ingress, Action::Allow)],
+    };
+
+    // Act
+    let result = evaluator.evaluate(&candidate).await;
+
+    // Assert
+    assert!(matches!(result, Err(EvaluationError::EmptyPath)));
 }
 
 #[tokio::test]
