@@ -7,14 +7,19 @@ use thiserror::Error;
 /// Reserved for genuine write failures (transport, driver errors) — an
 /// unresolved cross-account reference is not an error, see `resolved: bool`
 /// on the relevant edge properties in `crates/core/docs/schema.md`.
+///
+/// The `source` is boxed rather than typed as `neo4rs::Error` so this type
+/// stays implementation-agnostic, matching [`crate::ports::GraphWriter`]
+/// itself: a non-Neo4j implementation must be able to report its own
+/// failures without this error type forcing a driver dependency on it.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GraphWriteError {
-    /// The underlying write to Neo4j failed.
+    /// The underlying write to the graph failed.
     #[error("failed to write to the graph: {source}")]
     Write {
         #[source]
-        source: neo4rs::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -23,15 +28,19 @@ pub enum GraphWriteError {
 /// Reserved for genuine failures only. An unresolvable cross-account
 /// reference (expected in local-audit mode) is a successful outcome —
 /// see [`crate::ports::ResolvedReference`] — not an `Err` here.
+///
+/// `Transport`'s `source` is boxed rather than typed as `neo4rs::Error` for
+/// the same reason as [`GraphWriteError::Write`]'s: `Resolver` itself must
+/// not require a Neo4j implementation.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ResolveError {
     /// A transport-level failure occurred while attempting to resolve a
-    /// reference (e.g. the Neo4j driver call failed).
+    /// reference (e.g. an underlying driver call failed).
     #[error("transport failure while resolving a reference: {source}")]
     Transport {
         #[source]
-        source: neo4rs::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// The input given to the resolver was malformed and could not be

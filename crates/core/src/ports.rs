@@ -17,9 +17,13 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A node or edge record accepted by a [`GraphWriter`] upsert method.
 ///
-/// Each record's first field is the upsert key: implementors must match on
-/// it (`MERGE` semantics), not insert unconditionally, so re-ingesting the
-/// same AWS resource updates it in place rather than duplicating it.
+/// For node records (this one and the ones below it up to [`RoutesToEdge`]),
+/// the first field is the upsert key: implementors must match on it (`MERGE`
+/// semantics), not insert unconditionally, so re-ingesting the same AWS
+/// resource updates it in place rather than duplicating it. Edge records key
+/// on the combination of their endpoint fields instead — see each edge's own
+/// doc comment for its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EniRecord {
     pub id: String,
     pub account_id: String,
@@ -30,6 +34,7 @@ pub struct EniRecord {
 }
 
 /// A `SecurityGroup` node record. See [`EniRecord`] for upsert-key semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityGroupRecord {
     pub id: String,
     pub account_id: String,
@@ -39,6 +44,7 @@ pub struct SecurityGroupRecord {
 }
 
 /// A `NetworkACL` node record. See [`EniRecord`] for upsert-key semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkAclRecord {
     pub id: String,
     pub account_id: String,
@@ -47,6 +53,7 @@ pub struct NetworkAclRecord {
 }
 
 /// A `Subnet` node record. See [`EniRecord`] for upsert-key semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubnetRecord {
     pub id: String,
     pub account_id: String,
@@ -56,6 +63,7 @@ pub struct SubnetRecord {
 }
 
 /// A `VPC` node record. See [`EniRecord`] for upsert-key semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpcRecord {
     pub id: String,
     pub account_id: String,
@@ -63,6 +71,7 @@ pub struct VpcRecord {
 }
 
 /// A `RouteTable` node record. See [`EniRecord`] for upsert-key semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTableRecord {
     pub id: String,
     pub account_id: String,
@@ -72,6 +81,7 @@ pub struct RouteTableRecord {
 
 /// A `RegulatedBoundary` node record, operator-assigned rather than sourced
 /// from AWS. See [`EniRecord`] for upsert-key semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegulatedBoundaryRecord {
     pub id: String,
     pub account_id: String,
@@ -81,24 +91,32 @@ pub struct RegulatedBoundaryRecord {
 }
 
 /// A `HAS_SG` edge: `ENI` → `SecurityGroup` membership, no properties.
+/// Keyed on `(eni_id, security_group_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HasSgEdge {
     pub eni_id: String,
     pub security_group_id: String,
 }
 
-/// An `IN_SUBNET` edge: `ENI` → `Subnet`, no properties.
+/// An `IN_SUBNET` edge: `ENI` → `Subnet`, no properties. Keyed on
+/// `(eni_id, subnet_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InSubnetEdge {
     pub eni_id: String,
     pub subnet_id: String,
 }
 
-/// A `PROTECTED_BY` edge: `Subnet` → `NetworkACL`, no properties.
+/// A `PROTECTED_BY` edge: `Subnet` → `NetworkACL`, no properties. Keyed on
+/// `(subnet_id, network_acl_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedByEdge {
     pub subnet_id: String,
     pub network_acl_id: String,
 }
 
-/// A `USES_ROUTE_TABLE` edge: `Subnet` → `RouteTable`, no properties.
+/// A `USES_ROUTE_TABLE` edge: `Subnet` → `RouteTable`, no properties. Keyed
+/// on `(subnet_id, route_table_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsesRouteTableEdge {
     pub subnet_id: String,
     pub route_table_id: String,
@@ -106,7 +124,9 @@ pub struct UsesRouteTableEdge {
 
 /// A `ROUTES_TO` edge: `RouteTable` → target, where target is a `VPC` node
 /// id when `resolved` is `true`, or absent (internet/NAT gateway, peering
-/// connection) when `false` — see `schema.md`'s `ROUTES_TO` notes.
+/// connection) when `false` — see `schema.md`'s `ROUTES_TO` notes. Keyed on
+/// `(route_table_id, destination_cidr)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutesToEdge {
     pub route_table_id: String,
     pub destination_cidr: String,
@@ -191,32 +211,47 @@ pub trait GraphWriter {
         edges: &[RoutesToEdge],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
-    /// Upserts `ALLOWS_EGRESS` edges for one `SecurityGroup`, keyed on
-    /// `source_security_group_id` plus each rule's fields. `rules` with
-    /// `resolved: false` (unresolvable cross-account `SecurityGroupRef`)
-    /// must still be written, never dropped, per `schema.md`.
+    /// Upserts `ALLOWS_EGRESS` edges across `batches` (one entry per source
+    /// `SecurityGroup`), keyed on `security_group_id` plus each rule's
+    /// fields. Rules with `resolved: false` (unresolvable cross-account
+    /// `SecurityGroupRef`) must still be written, never dropped, per
+    /// `schema.md`.
     fn upsert_allows_egress_rules(
         &self,
-        source_security_group_id: &str,
-        rules: &[SgRule],
+        batches: &[SgRuleBatch<'_>],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
-    /// Upserts `ALLOWS_INGRESS` edges for one `SecurityGroup`. Same
-    /// unresolved-rule contract as [`GraphWriter::upsert_allows_egress_rules`].
+    /// Upserts `ALLOWS_INGRESS` edges across `batches`. Same unresolved-rule
+    /// contract as [`GraphWriter::upsert_allows_egress_rules`].
     fn upsert_allows_ingress_rules(
         &self,
-        source_security_group_id: &str,
-        rules: &[SgRule],
+        batches: &[SgRuleBatch<'_>],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
-    /// Upserts `HAS_RULE` self-edges for one `NetworkACL`, keyed on
-    /// `network_acl_id` plus each rule's `rule_number` (never insertion
-    /// order — see `NaclRule::rule_number`'s doc comment).
+    /// Upserts `HAS_RULE` self-edges across `batches` (one entry per
+    /// `NetworkACL`), keyed on `network_acl_id` plus each rule's
+    /// `rule_number` (never insertion order — see `NaclRule::rule_number`'s
+    /// doc comment).
     fn upsert_has_rules(
         &self,
-        network_acl_id: &str,
-        rules: &[NaclRule],
+        batches: &[NaclRuleBatch<'_>],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
+}
+
+/// One `SecurityGroup`'s rules for a single [`GraphWriter`] egress/ingress
+/// upsert call, batched alongside other security groups' rules in one slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SgRuleBatch<'a> {
+    pub security_group_id: &'a str,
+    pub rules: &'a [SgRule],
+}
+
+/// One `NetworkACL`'s rules for a single [`GraphWriter::upsert_has_rules`]
+/// call, batched alongside other network ACLs' rules in one slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NaclRuleBatch<'a> {
+    pub network_acl_id: &'a str,
+    pub rules: &'a [NaclRule],
 }
 
 /// The outcome of attempting to resolve an ambiguous reference (e.g. an
@@ -260,6 +295,7 @@ pub trait Resolver {
 /// judge, composed entirely of `core::domain` types with no database
 /// dependency — the caller (Milestone 2) is responsible for loading these
 /// from wherever the graph data lives before calling [`Evaluator::evaluate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathCandidate {
     /// Unique key of the source node the candidate path starts from.
     pub source: String,
