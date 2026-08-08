@@ -5,9 +5,15 @@
 //! for the node/edge shapes these traits write and read.
 
 use std::future::Future;
+use std::pin::Pin;
 
 use crate::domain::{Hop, NaclRule, ReachabilityFinding, SgRule};
 use crate::error::{EvaluationError, GraphWriteError, ResolveError};
+
+/// A boxed, `Send` future, used so `GraphWriter`, `Resolver`, and `Evaluator`
+/// stay object-safe (`dyn GraphWriter`, etc.) — `-> impl Future` in a public
+/// trait is not, since the concrete future type can't be named for a vtable.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A node or edge record accepted by a [`GraphWriter`] upsert method.
 ///
@@ -120,76 +126,70 @@ pub struct RoutesToEdge {
 /// item. An empty slice is a valid, successful no-op.
 pub trait GraphWriter {
     /// Upserts `ENI` nodes. See the struct contract on [`GraphWriter`].
-    fn upsert_enis(
-        &self,
-        enis: &[EniRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    fn upsert_enis(&self, enis: &[EniRecord]) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `SecurityGroup` nodes. See the struct contract on [`GraphWriter`].
     fn upsert_security_groups(
         &self,
         security_groups: &[SecurityGroupRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `NetworkACL` nodes. See the struct contract on [`GraphWriter`].
     fn upsert_network_acls(
         &self,
         network_acls: &[NetworkAclRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `Subnet` nodes. See the struct contract on [`GraphWriter`].
     fn upsert_subnets(
         &self,
         subnets: &[SubnetRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `VPC` nodes. See the struct contract on [`GraphWriter`].
-    fn upsert_vpcs(
-        &self,
-        vpcs: &[VpcRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    fn upsert_vpcs(&self, vpcs: &[VpcRecord]) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `RouteTable` nodes. See the struct contract on [`GraphWriter`].
     fn upsert_route_tables(
         &self,
         route_tables: &[RouteTableRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `RegulatedBoundary` nodes. See the struct contract on [`GraphWriter`].
     fn upsert_regulated_boundaries(
         &self,
         boundaries: &[RegulatedBoundaryRecord],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `HAS_SG` edges. See the struct contract on [`GraphWriter`].
     fn upsert_has_sg_edges(
         &self,
         edges: &[HasSgEdge],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `IN_SUBNET` edges. See the struct contract on [`GraphWriter`].
     fn upsert_in_subnet_edges(
         &self,
         edges: &[InSubnetEdge],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `PROTECTED_BY` edges. See the struct contract on [`GraphWriter`].
     fn upsert_protected_by_edges(
         &self,
         edges: &[ProtectedByEdge],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `USES_ROUTE_TABLE` edges. See the struct contract on [`GraphWriter`].
     fn upsert_uses_route_table_edges(
         &self,
         edges: &[UsesRouteTableEdge],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `ROUTES_TO` edges. See the struct contract on [`GraphWriter`].
     fn upsert_routes_to_edges(
         &self,
         edges: &[RoutesToEdge],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `ALLOWS_EGRESS` edges for one `SecurityGroup`, keyed on
     /// `source_security_group_id` plus each rule's fields. `rules` with
@@ -199,7 +199,7 @@ pub trait GraphWriter {
         &self,
         source_security_group_id: &str,
         rules: &[SgRule],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `ALLOWS_INGRESS` edges for one `SecurityGroup`. Same
     /// unresolved-rule contract as [`GraphWriter::upsert_allows_egress_rules`].
@@ -207,7 +207,7 @@ pub trait GraphWriter {
         &self,
         source_security_group_id: &str,
         rules: &[SgRule],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 
     /// Upserts `HAS_RULE` self-edges for one `NetworkACL`, keyed on
     /// `network_acl_id` plus each rule's `rule_number` (never insertion
@@ -216,7 +216,7 @@ pub trait GraphWriter {
         &self,
         network_acl_id: &str,
         rules: &[NaclRule],
-    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+    ) -> BoxFuture<'_, Result<(), GraphWriteError>>;
 }
 
 /// The outcome of attempting to resolve an ambiguous reference (e.g. an
@@ -253,7 +253,7 @@ pub trait Resolver {
     fn resolve_security_group_reference(
         &self,
         security_group_id: &str,
-    ) -> impl Future<Output = Result<ResolvedReference, ResolveError>> + Send;
+    ) -> BoxFuture<'_, Result<ResolvedReference, ResolveError>>;
 }
 
 /// A materialized reachability path candidate for an [`Evaluator`] to
@@ -299,5 +299,5 @@ pub trait Evaluator {
     fn evaluate(
         &self,
         candidate: &PathCandidate,
-    ) -> impl Future<Output = Result<Option<ReachabilityFinding>, EvaluationError>> + Send;
+    ) -> BoxFuture<'_, Result<Option<ReachabilityFinding>, EvaluationError>>;
 }
