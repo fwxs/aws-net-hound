@@ -6,6 +6,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Severity of a reachability finding.
+///
+/// `Ord` is derived from declaration order — `Low < Medium < High <
+/// Critical` — and pinned by
+/// `tests::severity_ord_ranks_in_declared_order`. A new variant must be
+/// inserted at its intended rank, not appended, or that test catches the
+/// inversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -17,15 +23,19 @@ pub enum Severity {
 }
 
 /// The node types a reachability path can hop through, mirroring the node
-/// kinds in `schema.md`.
+/// kinds in `schema.md`. Serialized values match the graph node labels
+/// exactly (`ENI`, `SecurityGroup`, `NetworkACL`, ...), not
+/// `snake_case`, so a `Hop.node_kind` compares directly against a Cypher
+/// label string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum NodeKind {
+    #[serde(rename = "ENI")]
     Eni,
     SecurityGroup,
+    #[serde(rename = "NetworkACL")]
     NetworkAcl,
     Subnet,
+    #[serde(rename = "VPC")]
     Vpc,
     RouteTable,
     RegulatedBoundary,
@@ -107,15 +117,42 @@ mod tests {
     }
 
     #[test]
-    fn severity_ord_ranks_critical_above_low() {
+    fn severity_ord_ranks_in_declared_order() {
         // Arrange
-        let low = Severity::Low;
-        let critical = Severity::Critical;
+        let ascending = [
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ];
+        let mut shuffled = [
+            Severity::Critical,
+            Severity::Low,
+            Severity::High,
+            Severity::Medium,
+        ];
 
         // Act
-        let is_critical_higher = critical > low;
+        shuffled.sort();
 
         // Assert
-        assert_eq!(is_critical_higher, true);
+        assert_eq!(shuffled, ascending);
+    }
+
+    #[test]
+    fn node_kind_serializes_using_graph_labels() {
+        // Arrange
+        let kinds = [
+            (NodeKind::Eni, "ENI"),
+            (NodeKind::NetworkAcl, "NetworkACL"),
+            (NodeKind::Vpc, "VPC"),
+        ];
+
+        // Act & Assert
+        for (kind, label) in kinds {
+            let serialized = serde_norway::to_string(&kind)
+                .unwrap_or_else(|error| panic!("failed to serialize NodeKind: {error}"));
+            assert_eq!(serialized.trim(), label);
+        }
     }
 }

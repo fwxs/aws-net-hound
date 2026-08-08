@@ -18,12 +18,32 @@ pub enum RuleError {
 }
 
 /// Traffic direction a rule applies to.
+///
+/// Not an edge property: for `SgRule` it selects which edge type
+/// (`ALLOWS_EGRESS` vs `ALLOWS_INGRESS`) the rule is written as, so it must
+/// not itself be persisted as a property when the M1 writer ingests a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum Direction {
     Ingress,
     Egress,
+}
+
+/// Shadow type `PortRange` deserializes through, so `Deserialize` can never
+/// bypass `PortRange::new`'s validation the way a derived impl on private
+/// fields would.
+#[derive(Deserialize)]
+struct PortRangeData {
+    from_port: u16,
+    to_port: u16,
+}
+
+impl TryFrom<PortRangeData> for PortRange {
+    type Error = RuleError;
+
+    fn try_from(data: PortRangeData) -> Result<Self, Self::Error> {
+        PortRange::new(data.from_port, data.to_port)
+    }
 }
 
 /// An inclusive port range, `from_port <= to_port`.
@@ -31,6 +51,7 @@ pub enum Direction {
 /// Absent entirely (`None` on the owning rule) when the protocol has no
 /// port concept (e.g. `-1` for all protocols).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PortRangeData")]
 pub struct PortRange {
     from_port: u16,
     to_port: u16,
@@ -69,10 +90,16 @@ impl PortRange {
 ///
 /// Mutually exclusive by construction: a rule targets either a CIDR block
 /// or a security-group reference, never both — see `schema.md`'s
-/// "Evaluable rules" section.
+/// "Evaluable rules" section. `#[serde(flatten)]` on the owning field
+/// makes `target_kind`/`cidr` serialize as sibling properties rather than
+/// a nested map, matching the flat edge-property shape in `schema.md`.
+///
+/// `SecurityGroupRef.security_group_id` has no counterpart in the edge
+/// property table: in the graph the reference is a destination *node*, not
+/// a property. The M1 writer uses this id to pick that destination node
+/// and does not persist it as a property.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target_kind", rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum RuleTarget {
     /// A CIDR block target, e.g. `0.0.0.0/0`.
     Cidr { cidr: String },
@@ -82,7 +109,11 @@ pub enum RuleTarget {
 
 /// A security group egress or ingress rule.
 ///
-/// Mirrors the `ALLOWS_EGRESS` / `ALLOWS_INGRESS` edge properties.
+/// Mirrors the `ALLOWS_EGRESS` / `ALLOWS_INGRESS` edge properties, except
+/// `direction` (see [`Direction`]'s doc comment) and
+/// `target.security_group_id` (see [`RuleTarget`]'s doc comment), which the
+/// M1 writer consumes to select the edge type and destination node rather
+/// than persisting as properties.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SgRule {
     /// Whether this rule is an egress or ingress rule.
@@ -90,9 +121,13 @@ pub struct SgRule {
     /// IANA protocol name or `-1` for all protocols, e.g. `tcp`, `udp`.
     pub protocol: String,
     /// Port range this rule applies to; `None` when the protocol has no
-    /// ports (e.g. `-1`).
+    /// ports (e.g. `-1`). Flattened so `from_port`/`to_port` serialize as
+    /// top-level properties, matching `schema.md`.
+    #[serde(flatten)]
     pub port_range: Option<PortRange>,
-    /// The rule's target: a CIDR or a security-group reference.
+    /// The rule's target: a CIDR or a security-group reference. Flattened
+    /// so `target_kind`/`cidr` serialize as top-level properties.
+    #[serde(flatten)]
     pub target: RuleTarget,
     /// `false` when `target` is a `SecurityGroupRef` that could not be
     /// dereferenced (e.g. cross-account reference in local-audit mode).
@@ -105,7 +140,6 @@ pub struct SgRule {
 /// has exactly these two outcomes and no implicit third state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum Action {
     Allow,
     Deny,
@@ -127,7 +161,9 @@ pub struct NaclRule {
     /// IANA protocol name or `-1` for all protocols.
     pub protocol: String,
     /// Port range this rule applies to; `None` when the protocol has no
-    /// ports.
+    /// ports. Flattened so `from_port`/`to_port` serialize as top-level
+    /// properties, matching `schema.md`.
+    #[serde(flatten)]
     pub port_range: Option<PortRange>,
     /// CIDR this rule matches against. NACL rules are always CIDR-based —
     /// there is no security-group-reference form, unlike `SgRule`.
@@ -140,6 +176,11 @@ pub struct NaclRule {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    fn valid_port_range(from_port: u16, to_port: u16) -> PortRange {
+        PortRange::new(from_port, to_port)
+            .unwrap_or_else(|error| panic!("expected a valid port range: {error}"))
+    }
 
     #[test]
     fn port_range_new_with_inverted_bounds_returns_validation_error() {
@@ -161,6 +202,18 @@ mod tests {
     }
 
     #[test]
+    fn port_range_deserialize_with_inverted_bounds_returns_validation_error() {
+        // Arrange
+        let yaml = "from_port: 443\nto_port: 80\n";
+
+        // Act
+        let result: Result<PortRange, _> = serde_norway::from_str(yaml);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn nacl_rules_sort_by_rule_number_ascending() {
         // Arrange
         let mut rules = [
@@ -168,7 +221,7 @@ mod tests {
                 rule_number: 300,
                 direction: Direction::Ingress,
                 protocol: "tcp".to_string(),
-                port_range: PortRange::new(80, 80).ok(),
+                port_range: Some(valid_port_range(80, 80)),
                 cidr: "0.0.0.0/0".to_string(),
                 action: Action::Allow,
             },
@@ -176,7 +229,7 @@ mod tests {
                 rule_number: 100,
                 direction: Direction::Ingress,
                 protocol: "tcp".to_string(),
-                port_range: PortRange::new(22, 22).ok(),
+                port_range: Some(valid_port_range(22, 22)),
                 cidr: "10.0.0.0/8".to_string(),
                 action: Action::Deny,
             },
@@ -204,7 +257,7 @@ mod tests {
         let rule = SgRule {
             direction: Direction::Egress,
             protocol: "tcp".to_string(),
-            port_range: PortRange::new(443, 443).ok(),
+            port_range: Some(valid_port_range(443, 443)),
             target: RuleTarget::SecurityGroupRef {
                 security_group_id: "sg-0example".to_string(),
             },
@@ -212,13 +265,38 @@ mod tests {
         };
 
         // Act
-        let json = serde_json_test_roundtrip(&rule);
+        let roundtripped = serde_yaml_roundtrip(&rule);
 
         // Assert
-        assert_eq!(json.resolved, false);
+        assert_eq!(roundtripped.resolved, false);
     }
 
-    fn serde_json_test_roundtrip(rule: &SgRule) -> SgRule {
+    #[test]
+    fn sg_rule_serializes_port_range_as_flat_properties() {
+        // Arrange
+        let rule = SgRule {
+            direction: Direction::Ingress,
+            protocol: "tcp".to_string(),
+            port_range: Some(valid_port_range(80, 443)),
+            target: RuleTarget::Cidr {
+                cidr: "0.0.0.0/0".to_string(),
+            },
+            resolved: true,
+        };
+
+        // Act
+        let yaml = serde_norway::to_string(&rule)
+            .unwrap_or_else(|error| panic!("failed to serialize SgRule: {error}"));
+
+        // Assert
+        assert!(yaml.contains("from_port: 80"));
+        assert!(yaml.contains("to_port: 443"));
+        assert!(yaml.contains("target_kind: cidr"));
+        assert!(!yaml.contains("port_range:"));
+        assert!(!yaml.contains("target:"));
+    }
+
+    fn serde_yaml_roundtrip(rule: &SgRule) -> SgRule {
         let serialized = serde_norway::to_string(rule)
             .unwrap_or_else(|error| panic!("failed to serialize SgRule: {error}"));
         serde_norway::from_str(&serialized)
