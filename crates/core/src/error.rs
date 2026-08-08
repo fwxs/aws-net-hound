@@ -1,6 +1,61 @@
-//! Error types for the migration runner.
+//! Error types for the migration runner and the `ports` trait contracts.
 
 use thiserror::Error;
+
+/// Errors a [`crate::ports::GraphWriter`] implementation can return.
+///
+/// Reserved for genuine write failures (transport, driver errors) — an
+/// unresolved cross-account reference is not an error, see `resolved: bool`
+/// on the relevant edge properties in `crates/core/docs/schema.md`.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum GraphWriteError {
+    /// The underlying write to Neo4j failed.
+    #[error("failed to write to the graph: {source}")]
+    Write {
+        #[source]
+        source: neo4rs::Error,
+    },
+}
+
+/// Errors a [`crate::ports::Resolver`] implementation can return.
+///
+/// Reserved for genuine failures only. An unresolvable cross-account
+/// reference (expected in local-audit mode) is a successful outcome —
+/// see [`crate::ports::ResolvedReference`] — not an `Err` here.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ResolveError {
+    /// A transport-level failure occurred while attempting to resolve a
+    /// reference (e.g. the Neo4j driver call failed).
+    #[error("transport failure while resolving a reference: {source}")]
+    Transport {
+        #[source]
+        source: neo4rs::Error,
+    },
+
+    /// The input given to the resolver was malformed and could not be
+    /// interpreted as a resolvable reference.
+    #[error("malformed input while resolving a reference: {reason}")]
+    MalformedInput { reason: String },
+}
+
+/// Errors a [`crate::ports::Evaluator`] implementation can return.
+///
+/// Deliberately free of any Neo4j/driver type: the `Evaluator` trait
+/// operates only on already-materialized `core::domain` structs, and its
+/// error type must not reintroduce a database dependency.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum EvaluationError {
+    /// The path candidate had no hops to evaluate.
+    #[error("path candidate is empty, no hops to evaluate")]
+    EmptyPath,
+
+    /// A hop within the path candidate was structurally invalid.
+    #[error("path candidate has an invalid hop at index {index}: {reason}")]
+    InvalidHop { index: usize, reason: String },
+}
 
 /// Errors that can occur while ordering, applying, or recording schema
 /// migrations against Neo4j.

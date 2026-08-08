@@ -5,3 +5,4 @@
 pub mod domain;
 pub mod error;
 pub mod migrations;
+pub mod ports;

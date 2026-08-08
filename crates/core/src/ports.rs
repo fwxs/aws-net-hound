@@ -1,0 +1,303 @@
+//! Core trait contracts (`GraphWriter`, `Resolver`, `Evaluator`) that seam
+//! off the Neo4j driver from Milestone 2's evaluation logic.
+//!
+//! No Neo4j implementation lives here — see `crates/core/docs/schema.md`
+//! for the node/edge shapes these traits write and read.
+
+use std::future::Future;
+
+use crate::domain::{Hop, NaclRule, ReachabilityFinding, SgRule};
+use crate::error::{EvaluationError, GraphWriteError, ResolveError};
+
+/// A node or edge record accepted by a [`GraphWriter`] upsert method.
+///
+/// Each record's first field is the upsert key: implementors must match on
+/// it (`MERGE` semantics), not insert unconditionally, so re-ingesting the
+/// same AWS resource updates it in place rather than duplicating it.
+pub struct EniRecord {
+    pub id: String,
+    pub account_id: String,
+    pub vpc_id: String,
+    pub subnet_id: String,
+    pub private_ip: String,
+    pub description: Option<String>,
+}
+
+/// A `SecurityGroup` node record. See [`EniRecord`] for upsert-key semantics.
+pub struct SecurityGroupRecord {
+    pub id: String,
+    pub account_id: String,
+    pub vpc_id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// A `NetworkACL` node record. See [`EniRecord`] for upsert-key semantics.
+pub struct NetworkAclRecord {
+    pub id: String,
+    pub account_id: String,
+    pub vpc_id: String,
+    pub is_default: bool,
+}
+
+/// A `Subnet` node record. See [`EniRecord`] for upsert-key semantics.
+pub struct SubnetRecord {
+    pub id: String,
+    pub account_id: String,
+    pub vpc_id: String,
+    pub cidr_block: String,
+    pub availability_zone: String,
+}
+
+/// A `VPC` node record. See [`EniRecord`] for upsert-key semantics.
+pub struct VpcRecord {
+    pub id: String,
+    pub account_id: String,
+    pub cidr_block: String,
+}
+
+/// A `RouteTable` node record. See [`EniRecord`] for upsert-key semantics.
+pub struct RouteTableRecord {
+    pub id: String,
+    pub account_id: String,
+    pub vpc_id: String,
+    pub is_main: bool,
+}
+
+/// A `RegulatedBoundary` node record, operator-assigned rather than sourced
+/// from AWS. See [`EniRecord`] for upsert-key semantics.
+pub struct RegulatedBoundaryRecord {
+    pub id: String,
+    pub account_id: String,
+    pub name: String,
+    pub regime: String,
+    pub description: Option<String>,
+}
+
+/// A `HAS_SG` edge: `ENI` → `SecurityGroup` membership, no properties.
+pub struct HasSgEdge {
+    pub eni_id: String,
+    pub security_group_id: String,
+}
+
+/// An `IN_SUBNET` edge: `ENI` → `Subnet`, no properties.
+pub struct InSubnetEdge {
+    pub eni_id: String,
+    pub subnet_id: String,
+}
+
+/// A `PROTECTED_BY` edge: `Subnet` → `NetworkACL`, no properties.
+pub struct ProtectedByEdge {
+    pub subnet_id: String,
+    pub network_acl_id: String,
+}
+
+/// A `USES_ROUTE_TABLE` edge: `Subnet` → `RouteTable`, no properties.
+pub struct UsesRouteTableEdge {
+    pub subnet_id: String,
+    pub route_table_id: String,
+}
+
+/// A `ROUTES_TO` edge: `RouteTable` → target, where target is a `VPC` node
+/// id when `resolved` is `true`, or absent (internet/NAT gateway, peering
+/// connection) when `false` — see `schema.md`'s `ROUTES_TO` notes.
+pub struct RoutesToEdge {
+    pub route_table_id: String,
+    pub destination_cidr: String,
+    pub target_vpc_id: Option<String>,
+    pub resolved: bool,
+}
+
+/// Upsert methods for every node and edge type in `crates/core/docs/schema.md`.
+///
+/// # Contract
+///
+/// Implementors must treat every method as an idempotent `MERGE` keyed on
+/// each record's first field (see [`EniRecord`]'s doc comment) — calling a
+/// method twice with the same records must not create duplicates. Methods
+/// take slices so a caller can batch thousands of records (e.g. a full
+/// Milestone 1 ENI ingestion) into one call rather than one round trip per
+/// item. An empty slice is a valid, successful no-op.
+pub trait GraphWriter {
+    /// Upserts `ENI` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_enis(
+        &self,
+        enis: &[EniRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `SecurityGroup` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_security_groups(
+        &self,
+        security_groups: &[SecurityGroupRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `NetworkACL` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_network_acls(
+        &self,
+        network_acls: &[NetworkAclRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `Subnet` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_subnets(
+        &self,
+        subnets: &[SubnetRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `VPC` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_vpcs(
+        &self,
+        vpcs: &[VpcRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `RouteTable` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_route_tables(
+        &self,
+        route_tables: &[RouteTableRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `RegulatedBoundary` nodes. See the struct contract on [`GraphWriter`].
+    fn upsert_regulated_boundaries(
+        &self,
+        boundaries: &[RegulatedBoundaryRecord],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `HAS_SG` edges. See the struct contract on [`GraphWriter`].
+    fn upsert_has_sg_edges(
+        &self,
+        edges: &[HasSgEdge],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `IN_SUBNET` edges. See the struct contract on [`GraphWriter`].
+    fn upsert_in_subnet_edges(
+        &self,
+        edges: &[InSubnetEdge],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `PROTECTED_BY` edges. See the struct contract on [`GraphWriter`].
+    fn upsert_protected_by_edges(
+        &self,
+        edges: &[ProtectedByEdge],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `USES_ROUTE_TABLE` edges. See the struct contract on [`GraphWriter`].
+    fn upsert_uses_route_table_edges(
+        &self,
+        edges: &[UsesRouteTableEdge],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `ROUTES_TO` edges. See the struct contract on [`GraphWriter`].
+    fn upsert_routes_to_edges(
+        &self,
+        edges: &[RoutesToEdge],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `ALLOWS_EGRESS` edges for one `SecurityGroup`, keyed on
+    /// `source_security_group_id` plus each rule's fields. `rules` with
+    /// `resolved: false` (unresolvable cross-account `SecurityGroupRef`)
+    /// must still be written, never dropped, per `schema.md`.
+    fn upsert_allows_egress_rules(
+        &self,
+        source_security_group_id: &str,
+        rules: &[SgRule],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `ALLOWS_INGRESS` edges for one `SecurityGroup`. Same
+    /// unresolved-rule contract as [`GraphWriter::upsert_allows_egress_rules`].
+    fn upsert_allows_ingress_rules(
+        &self,
+        source_security_group_id: &str,
+        rules: &[SgRule],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+
+    /// Upserts `HAS_RULE` self-edges for one `NetworkACL`, keyed on
+    /// `network_acl_id` plus each rule's `rule_number` (never insertion
+    /// order — see `NaclRule::rule_number`'s doc comment).
+    fn upsert_has_rules(
+        &self,
+        network_acl_id: &str,
+        rules: &[NaclRule],
+    ) -> impl Future<Output = Result<(), GraphWriteError>> + Send;
+}
+
+/// The outcome of attempting to resolve an ambiguous reference (e.g. an
+/// `SgRule::target`'s `SecurityGroupRef` pointing at another security
+/// group).
+///
+/// `resolved: false` is a successful, expected outcome — most commonly a
+/// cross-account reference that local-audit mode cannot dereference — and
+/// must not be modeled as an `Err`. Reserve `Err` (see [`ResolveError`])
+/// for transport failures or malformed input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReference {
+    /// The security group id that was looked up.
+    pub security_group_id: String,
+    /// Whether the reference could be dereferenced to a known node.
+    pub resolved: bool,
+}
+
+/// Resolves ambiguous references that a `GraphWriter` upsert cannot decide
+/// on its own — currently, whether an `SgRule::target`'s
+/// `SecurityGroupRef` points at a security group visible in this audit's
+/// scope.
+///
+/// # Contract
+///
+/// Implementors must return `Ok(ResolvedReference { resolved: false, .. })`
+/// for a reference that is legitimately unresolvable in the current audit
+/// scope (e.g. cross-account in local-audit mode) — this is expected, not
+/// exceptional. `Err` is reserved for failures the caller cannot reason
+/// about (transport failure, malformed input) per [`ResolveError`].
+pub trait Resolver {
+    /// Resolves a security-group-reference target to whether it points at
+    /// a security group known in the current audit scope.
+    fn resolve_security_group_reference(
+        &self,
+        security_group_id: &str,
+    ) -> impl Future<Output = Result<ResolvedReference, ResolveError>> + Send;
+}
+
+/// A materialized reachability path candidate for an [`Evaluator`] to
+/// judge, composed entirely of `core::domain` types with no database
+/// dependency — the caller (Milestone 2) is responsible for loading these
+/// from wherever the graph data lives before calling [`Evaluator::evaluate`].
+pub struct PathCandidate {
+    /// Unique key of the source node the candidate path starts from.
+    pub source: String,
+    /// `RegulatedBoundary.id` the candidate path is being evaluated against.
+    pub destination_boundary: String,
+    /// Hops traversed, in traversal order (source first, destination last).
+    pub hops: Vec<Hop>,
+    /// Security group egress rules to intersect along the path.
+    pub security_group_egress_rules: Vec<SgRule>,
+    /// Security group ingress rules to intersect along the path.
+    pub security_group_ingress_rules: Vec<SgRule>,
+    /// Network ACL egress rules to intersect along the path, already
+    /// sorted by ascending `rule_number` (first match wins).
+    pub nacl_egress_rules: Vec<NaclRule>,
+    /// Network ACL ingress rules to intersect along the path, already
+    /// sorted by ascending `rule_number` (first match wins).
+    pub nacl_ingress_rules: Vec<NaclRule>,
+}
+
+/// Judges whether a materialized [`PathCandidate`] represents real traffic
+/// reachability, by intersecting security group egress/ingress and NACL
+/// egress/ingress rules.
+///
+/// # Contract
+///
+/// This trait must never mention Neo4j, the driver, or any database type
+/// in its signature — Milestone 2 depends on being able to unit-test SG/NACL
+/// intersection logic (correctness-critical) without a live database.
+/// Implementors may assume `candidate` is already fully materialized (no
+/// further graph traversal needed) and must return `Ok(None)` — not an
+/// `Err` — when the candidate does not represent reachable traffic.
+pub trait Evaluator {
+    /// Evaluates one path candidate, returning `Ok(Some(finding))` when
+    /// traffic reaches the destination boundary, `Ok(None)` when it is
+    /// blocked by an SG or NACL rule, or `Err` when the candidate itself
+    /// is structurally invalid (e.g. empty `hops`).
+    fn evaluate(
+        &self,
+        candidate: &PathCandidate,
+    ) -> impl Future<Output = Result<Option<ReachabilityFinding>, EvaluationError>> + Send;
+}
