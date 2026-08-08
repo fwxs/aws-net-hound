@@ -2,5 +2,6 @@
 //!
 //! Consumed by the `audit-local` and `aws-deploy` binaries.
 
+pub mod domain;
 pub mod error;
 pub mod migrations;

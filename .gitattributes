@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+*.rs text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.cypher text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+graphify-out/graph.json merge=graphify

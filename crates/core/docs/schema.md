@@ -170,6 +170,35 @@ inventing an eighth node type the rest of the schema doesn't need.
 | `cidr`        | String  | yes      | NACL rules are always CIDR-based, no SG reference form |
 | `action`      | String  | yes      | `"allow"` \| `"deny"` — never a bool, there is no implicit third state to collapse |
 
+### Struct-to-property crosswalk (M0-T5)
+
+`crates/core/src/domain/rule.rs` and `crates/core/src/domain/finding.rs` are
+derived from this document; field names match exactly.
+
+- `SgRule` ↔ `ALLOWS_EGRESS` / `ALLOWS_INGRESS`: `protocol`, `resolved`
+  match directly; `from_port`/`to_port` are `#[serde(flatten)]`-ed from
+  `port_range: Option<PortRange>` so they serialize as flat properties;
+  `target_kind`/`cidr` are similarly flattened from the `target: RuleTarget`
+  enum (`Cidr { cidr }` | `SecurityGroupRef { security_group_id }`).
+  `SgRule.direction` and `RuleTarget::SecurityGroupRef.security_group_id`
+  have **no property counterpart** — `direction` selects the
+  `ALLOWS_EGRESS`/`ALLOWS_INGRESS` edge type, and `security_group_id`
+  selects the destination `SecurityGroup` node. The M1 writer consumes
+  both to pick edge type and endpoint and does not persist them as
+  properties.
+- `NaclRule` ↔ `HAS_RULE`: `rule_number`, `direction`, `protocol`, `cidr`
+  match directly; `from_port`/`to_port` are `#[serde(flatten)]`-ed from
+  `port_range: Option<PortRange>`; `action` is the `Action` enum (`Allow` |
+  `Deny`) rather than the edge's `"allow"` \| `"deny"` string. Unlike
+  `SgRule`, `NaclRule.direction` *is* a `HAS_RULE` property (the self-edge
+  carries both directions' rules), so it round-trips as-is.
+- `ReachabilityFinding` (Milestone 2 evaluator output, no corresponding
+  graph edge yet — computed at query time, not stored): `computed_at`,
+  `source`, `destination_boundary` are direct fields; `path_evidence` is a
+  structured `PathEvidence { hops: Vec<Hop> }` listing each traversed
+  node's id and kind, not a pre-rendered string; `severity` is the
+  `Severity` enum (`Low` | `Medium` | `High` | `Critical`).
+
 ## Cross-cutting notes
 
 - `rule_number` (on `HAS_RULE`) is stored as an **ordered integer** and is
