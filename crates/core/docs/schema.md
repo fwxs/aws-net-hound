@@ -12,7 +12,9 @@ All example IDs below are synthetic placeholders — `123456789012`,
 
 Every node's first property is its **unique key**: the AWS resource ID for
 AWS-native resources, sourced verbatim from the relevant `Describe*` API
-response. Uniqueness constraints (M0-T3) are asserted on this key.
+response. Uniqueness constraints on this key, and indexes on `account_id` /
+`vpc_id`, are asserted in `migrations/0001_constraints.cypher` and
+`migrations/0002_indexes.cypher` (M0-T3).
 
 ### `ENI`
 
@@ -180,6 +182,6 @@ inventing an eighth node type the rest of the schema doesn't need.
   surfaced to the evaluator as such.
 - `account_id` and `vpc_id` are carried directly on every node type that
   has them (all except `RegulatedBoundary`, which has no `vpc_id`) so
-  reachability queries can filter without a join back to `VPC`. M0-T3
-  indexes both fields on the node types that carry them, plus `resolved`
-  on the rule edges.
+  reachability queries can filter without a join back to `VPC`.
+  `migrations/0002_indexes.cypher` indexes both fields on the node types
+  that carry them, plus `resolved` on `ALLOWS_EGRESS` / `ALLOWS_INGRESS`.
