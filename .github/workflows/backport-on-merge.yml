@@ -1,0 +1,72 @@
+name: Backport to Develop on Merge
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+jobs:
+  backport:
+    name: Create backport branch and PR
+    # Only run when the PR was actually merged, not just closed
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Full history needed to create branches correctly
+          fetch-depth: 0
+
+      - name: Generate backport branch name
+        id: branch_name
+        run: |
+          # Format: yyyymmdd-HHmm in UTC
+          BRANCH="backport/$(date -u +'%Y%m%d-%H%M')-pr${{ github.event.pull_request.number }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create backport branch from main
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${{ steps.branch_name.outputs.branch }}"
+          git push origin "${{ steps.branch_name.outputs.branch }}"
+
+      - name: Verify develop branch exists
+        id: check_develop
+        run: |
+          if git ls-remote --exit-code --heads origin develop; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::develop branch not found. Skipping PR creation."
+          fi
+
+      - name: Create PR to develop
+        if: steps.check_develop.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base develop \
+            --head "${{ steps.branch_name.outputs.branch }}" \
+            --title "chore: backport from main (${{ steps.branch_name.outputs.branch }})" \
+            --body "$(cat <<'EOF'
+          ## Backport PR
+
+          This PR was automatically created after merging [#${{ github.event.pull_request.number }}](${{ github.event.pull_request.html_url }}) into \`main\`.
+
+          **Source PR:** ${{ github.event.pull_request.title }}
+          **Merged by:** @${{ github.event.pull_request.merged_by.login }}
+          **Backport branch:** \`${{ steps.branch_name.outputs.branch }}\`
+
+          > Review and merge to keep \`develop\` in sync with \`main\`.
+          EOF
+          )"
