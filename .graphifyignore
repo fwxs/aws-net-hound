@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+.git
+.github
+.claude
+loot
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
