@@ -3,6 +3,13 @@ name = "core"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+# `core` collides with the sysroot `core` crate in the extern prelude,
+# breaking std macros (assert_eq!, tokio::test) inside this crate's own
+# test binaries. Compile under a distinct crate name; package/directory
+# name stays `core`.
+name = "aws_net_hound_core"
+
 [lints]
 workspace = true
 
