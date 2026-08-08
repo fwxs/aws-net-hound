@@ -19,12 +19,27 @@ use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, Generi
 const NEO4J_IMAGE: &str = "neo4j";
 const NEO4J_TAG: &str = "5";
 const NEO4J_USER: &str = "neo4j";
-const NEO4J_PASSWORD: &str = "integration-test-password";
+
+// Per-run credential: an env var override for local debugging, otherwise a
+// value derived from the process id and current time. Never a literal —
+// literals in integration tests are a classic place for a real credential
+// to get copy-pasted in later and leak into git history.
+fn test_password() -> String {
+    if let Ok(password) = std::env::var("NEO4J_TEST_PASSWORD") {
+        return password;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after unix epoch")
+        .as_nanos();
+    format!("itp-{}-{nanos}", std::process::id())
+}
 
 async fn start_neo4j() -> (ContainerAsync<GenericImage>, Graph) {
+    let password = test_password();
     let container = GenericImage::new(NEO4J_IMAGE, NEO4J_TAG)
         .with_wait_for(WaitFor::message_on_stdout("Bolt enabled on"))
-        .with_env_var("NEO4J_AUTH", format!("{NEO4J_USER}/{NEO4J_PASSWORD}"))
+        .with_env_var("NEO4J_AUTH", format!("{NEO4J_USER}/{password}"))
         .start()
         .await
         .expect("neo4j container starts");
@@ -38,7 +53,7 @@ async fn start_neo4j() -> (ContainerAsync<GenericImage>, Graph) {
     let config = ConfigBuilder::default()
         .uri(format!("bolt://{host}:{port}"))
         .user(NEO4J_USER)
-        .password(NEO4J_PASSWORD)
+        .password(&password)
         .build()
         .expect("valid neo4j config");
 

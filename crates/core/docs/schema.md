@@ -8,6 +8,60 @@ this file wins and the code is the bug.
 All example IDs below are synthetic placeholders — `123456789012`,
 `eni-0example`, etc. — never real account IDs or ARNs.
 
+## Diagram
+
+All seven node types and both edge categories — topology edges as solid
+lines, evaluable-rule edges as dashed lines:
+
+```mermaid
+graph LR
+    ENI
+    SecurityGroup
+    NetworkACL
+    Subnet
+    VPC
+    RouteTable
+    RegulatedBoundary
+
+    ENI -->|HAS_SG| SecurityGroup
+    ENI -->|IN_SUBNET| Subnet
+    Subnet -->|PROTECTED_BY| NetworkACL
+    Subnet -->|USES_ROUTE_TABLE| RouteTable
+    RouteTable -->|ROUTES_TO| VPC
+
+    SecurityGroup -.->|ALLOWS_EGRESS| SecurityGroup
+    SecurityGroup -.->|ALLOWS_INGRESS| SecurityGroup
+    NetworkACL -.->|HAS_RULE| NetworkACL
+
+    RegulatedBoundary
+```
+
+`RegulatedBoundary` is drawn with no edges — see below, it correlates by
+`id` rather than by graph traversal in this milestone.
+
+## Why `SecurityGroup` and `NetworkACL` are separate layers
+
+This looks like redundancy — both are "a bag of rules attached to
+network traffic" — but the two evaluate completely differently, and
+collapsing them into one node type would make correct evaluation
+impossible:
+
+- **`SecurityGroup`** is an **unordered union of allow rules**. There is
+  no deny rule and no rule ordering — every matching `ALLOWS_EGRESS` /
+  `ALLOWS_INGRESS` edge independently grants traffic, and evaluation is
+  simply "does at least one rule match."
+- **`NetworkACL`** is an **ordered, first-match evaluation over allow
+  *and* deny rules**, keyed by `HAS_RULE.rule_number` ascending. The
+  first rule that matches wins, whether it allows or denies, and every
+  rule after it is irrelevant for that packet.
+
+An evaluator that treated both as "a set of allow rules" would produce
+false negatives for NACLs (missing explicit denies) and false positives
+for order-dependent NACL rules (evaluating them as if every rule applied
+independently, like an SG). The two node types exist because their
+evaluation semantics are genuinely different, not because the schema
+needed two ways to say the same thing.
+
 ## Nodes
 
 Every node's first property is its **unique key**: the AWS resource ID for
