@@ -7,4 +7,4 @@ edition = "2021"
 workspace = true
 
 [dependencies]
-core = { path = "../core" }
+aws_net_hound_core = { path = "../core", package = "core" }
