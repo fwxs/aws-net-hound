@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/audit-local",
+    "crates/aws-deploy",
+]
+
+[workspace.dependencies]
+neo4rs = "0.8.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_norway = "0.9.42"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1.44"
+pretty_assertions = "1.4.1"
+testcontainers = "0.28.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
