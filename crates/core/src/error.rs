@@ -1,4 +1,5 @@
-//! Error types for the migration runner and the `ports` trait contracts.
+//! Error types for the migration runner, the `ports` trait contracts, and
+//! ingestion.
 
 use thiserror::Error;
 
@@ -131,4 +132,19 @@ pub enum MigrationError {
         #[source]
         source: neo4rs::Error,
     },
+}
+
+/// Errors that can occur while building an AWS client for ingestion.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum IngestError {
+    /// No AWS region was available from `IngestConfig::region`,
+    /// `AWS_REGION`/`AWS_DEFAULT_REGION`, or a profile default. A region is
+    /// never guessed or defaulted — see
+    /// [`crate::ingest::aws_client::build_ec2_client`].
+    #[error(
+        "no AWS region resolved: set `IngestConfig::region`, `AWS_REGION`/`AWS_DEFAULT_REGION`, \
+         or a profile default region"
+    )]
+    RegionNotResolved,
 }
