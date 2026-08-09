@@ -14,6 +14,8 @@ name = "aws_net_hound_core"
 workspace = true
 
 [dependencies]
+aws-config = { workspace = true }
+aws-sdk-ec2 = { workspace = true }
 neo4rs = { workspace = true }
 serde = { workspace = true }
 serde_norway = { workspace = true }

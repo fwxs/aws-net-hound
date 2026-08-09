@@ -4,5 +4,6 @@
 
 pub mod domain;
 pub mod error;
+pub mod ingest;
 pub mod migrations;
 pub mod ports;
