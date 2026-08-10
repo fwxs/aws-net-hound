@@ -32,14 +32,13 @@ use crate::error::IngestError;
 /// and error-mapping behaviour cannot diverge between the five `Describe*`
 /// APIs. Never logs a page's contents — only its item count — since ENI
 /// descriptions and tags routinely carry hostnames and owner names.
-async fn drain_pages<Output, Item, Error, Items>(
+async fn drain_pages<Output, Item, Error>(
     operation: &'static str,
     mut pages: PaginationStream<Result<Output, SdkError<Error, HttpResponse>>>,
-    extract_items: impl Fn(Output) -> Items,
+    extract_items: impl Fn(Output) -> Vec<Item>,
 ) -> Result<Vec<Item>, IngestError>
 where
     Error: std::error::Error + Send + Sync + 'static,
-    Items: IntoIterator<Item = Item>,
 {
     let mut items = Vec::new();
     while let Some(page) = pages.next().await {
@@ -47,9 +46,9 @@ where
             operation,
             source: Box::new(source),
         })?;
-        let mut page_items: Vec<Item> = extract_items(output).into_iter().collect();
+        let page_items = extract_items(output);
         debug!(operation, page_items = page_items.len(), "received page");
-        items.append(&mut page_items);
+        items.extend(page_items);
     }
     info!(operation, total_items = items.len(), "collected all pages");
     Ok(items)
