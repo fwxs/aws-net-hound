@@ -68,10 +68,16 @@ pub fn map_network_acl_rules(acl: &NetworkAcl) -> Result<Vec<NaclRule>, MappingE
                 reason: "field is required but absent".to_string(),
             })?;
 
-        let direction = if entry.egress.unwrap_or(false) {
-            Direction::Egress
-        } else {
-            Direction::Ingress
+        let direction = match entry.egress {
+            Some(true) => Direction::Egress,
+            Some(false) => Direction::Ingress,
+            None => {
+                return Err(MappingError::InvalidField {
+                    resource_id: network_acl_id.clone(),
+                    field: "egress",
+                    reason: "field is required but absent".to_string(),
+                });
+            }
         };
 
         let action = match entry.rule_action {
@@ -184,6 +190,28 @@ mod tests {
 
         // Assert
         assert_eq!(rules[0].direction, Direction::Egress);
+    }
+
+    #[test]
+    fn map_network_acl_rules_absent_egress_returns_mapping_error() {
+        // Arrange
+        let acl = NetworkAcl::builder()
+            .network_acl_id("acl-0example")
+            .entries(
+                NetworkAclEntry::builder()
+                    .rule_number(100)
+                    .protocol("tcp")
+                    .cidr_block("0.0.0.0/0")
+                    .rule_action(RuleAction::Allow)
+                    .build(),
+            )
+            .build();
+
+        // Act
+        let result = map_network_acl_rules(&acl);
+
+        // Assert
+        assert!(matches!(result, Err(MappingError::InvalidField { .. })));
     }
 
     #[test]
