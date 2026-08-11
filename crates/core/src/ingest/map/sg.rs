@@ -80,20 +80,17 @@ fn map_permission(
             + permission.user_id_group_pairs().len(),
     );
 
-    for ip_range in permission.ip_ranges() {
-        let cidr = require_str(group_id, "ip_ranges[].cidr_ip", &ip_range.cidr_ip)?.to_string();
-        rules.push(SgRule {
-            direction,
-            protocol: protocol.clone(),
-            port_range,
-            target: RuleTarget::Cidr { cidr },
-            resolved: true,
-        });
-    }
+    let ipv4_cidrs = permission
+        .ip_ranges()
+        .iter()
+        .map(|range| require_str(group_id, "ip_ranges[].cidr_ip", &range.cidr_ip));
+    let ipv6_cidrs = permission
+        .ipv6_ranges()
+        .iter()
+        .map(|range| require_str(group_id, "ipv6_ranges[].cidr_ipv6", &range.cidr_ipv6));
 
-    for ipv6_range in permission.ipv6_ranges() {
-        let cidr =
-            require_str(group_id, "ipv6_ranges[].cidr_ipv6", &ipv6_range.cidr_ipv6)?.to_string();
+    for cidr in ipv4_cidrs.chain(ipv6_cidrs) {
+        let cidr = cidr?.to_string();
         rules.push(SgRule {
             direction,
             protocol: protocol.clone(),
@@ -193,7 +190,7 @@ mod tests {
 
         // Assert
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].resolved, false);
+        assert!(!rules[0].resolved);
     }
 
     #[test]
@@ -218,7 +215,7 @@ mod tests {
 
         // Assert
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].resolved, true);
+        assert!(rules[0].resolved);
     }
 
     #[test]
@@ -238,7 +235,7 @@ mod tests {
 
         // Assert
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].resolved, true);
+        assert!(rules[0].resolved);
     }
 
     #[test]
