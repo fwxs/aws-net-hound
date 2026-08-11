@@ -147,4 +147,17 @@ pub enum IngestError {
          or a profile default region"
     )]
     RegionNotResolved,
+
+    /// A paginated `Describe*` EC2 call failed after the client's retry
+    /// policy (see [`crate::ingest::aws_client::build_ec2_client`]) was
+    /// exhausted. Carries the operation name so the failure can be
+    /// diagnosed without partial, silently-truncated results — see
+    /// [`crate::ingest::collect`].
+    #[error("EC2 {operation} failed: {source}")]
+    Describe {
+        /// The `Describe*` operation name, e.g. `"DescribeSecurityGroups"`.
+        operation: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }

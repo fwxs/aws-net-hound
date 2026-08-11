@@ -5,6 +5,7 @@
 //! behaviour cannot diverge silently between call sites.
 
 pub mod aws_client;
+pub mod collect;
 
 /// Configuration shared by ingestion: AWS client construction now, and the
 /// Neo4j connection settings [`crate::migrations`]'s caller and M1-T6's

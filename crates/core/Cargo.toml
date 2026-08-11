@@ -16,6 +16,8 @@ workspace = true
 [dependencies]
 aws-config = { workspace = true }
 aws-sdk-ec2 = { workspace = true }
+aws-smithy-async = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
 neo4rs = { workspace = true }
 serde = { workspace = true }
 serde_norway = { workspace = true }
@@ -24,5 +26,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+aws-sdk-ec2 = { workspace = true, features = ["test-util"] }
+aws-smithy-mocks = { workspace = true }
 pretty_assertions = { workspace = true }
 testcontainers = { workspace = true }
