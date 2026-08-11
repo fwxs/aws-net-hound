@@ -28,11 +28,17 @@ pub(crate) fn require_str<'a>(
 /// Normalises an SDK protocol/port-range pair into `Option<PortRange>`.
 ///
 /// `protocol == "-1"` (all protocols) never carries ports, so it short
-/// circuits to `None` regardless of what `from_port`/`to_port` contain. A
-/// negative `from_port`/`to_port` (AWS's per-port "-1" sentinel, e.g. "all
-/// ICMP types") likewise means "no specific port", not a port value, and
-/// also normalises to `None`. Both cases exist so the magic `-1` never
-/// survives into the domain type as a literal port number.
+/// circuits to `None` regardless of what `from_port`/`to_port` contain.
+///
+/// AWS overloads `from_port`/`to_port` for ICMP as `type`/`code`, and `-1`
+/// on either one is the "any" sentinel for that half of the pair (e.g.
+/// `from_port=8, to_port=-1` is "Echo Request, any code"). When both are
+/// `-1` there is no restriction at all, so this normalises to `None`. When
+/// only one side is `-1`, the other side's restriction must survive —
+/// dropping it would silently turn a type-scoped rule into "all ICMP". The
+/// domain has no separate type/code fields, so the restricted bound is
+/// mapped as a single-value range (`n..n`), losing only the "any code"
+/// breadth, never the type restriction itself.
 pub(crate) fn build_port_range(
     resource_id: &str,
     field: &'static str,
@@ -48,9 +54,12 @@ pub(crate) fn build_port_range(
         return Ok(None);
     };
 
-    if from_port < 0 || to_port < 0 {
-        return Ok(None);
-    }
+    let (from_port, to_port) = match (from_port < 0, to_port < 0) {
+        (true, true) => return Ok(None),
+        (true, false) => (to_port, to_port),
+        (false, true) => (from_port, from_port),
+        (false, false) => (from_port, to_port),
+    };
 
     let to_u16 = |value: i32| {
         u16::try_from(value).map_err(|_| MappingError::InvalidField {
@@ -69,4 +78,53 @@ pub(crate) fn build_port_range(
             field,
             reason: source.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn build_port_range_icmp_type_with_any_code_preserves_type_restriction() {
+        // Arrange
+        let from_port = Some(8);
+        let to_port = Some(-1);
+
+        // Act
+        let result = build_port_range("sg-0example", "port_range", "icmp", from_port, to_port)
+            .unwrap_or_else(|error| panic!("expected Ok: {error}"));
+
+        // Assert
+        assert_eq!(result, PortRange::new(8, 8).ok());
+    }
+
+    #[test]
+    fn build_port_range_icmp_any_type_with_code_preserves_code_restriction() {
+        // Arrange
+        let from_port = Some(-1);
+        let to_port = Some(0);
+
+        // Act
+        let result = build_port_range("sg-0example", "port_range", "icmp", from_port, to_port)
+            .unwrap_or_else(|error| panic!("expected Ok: {error}"));
+
+        // Assert
+        assert_eq!(result, PortRange::new(0, 0).ok());
+    }
+
+    #[test]
+    fn build_port_range_icmp_any_type_any_code_normalizes_to_none() {
+        // Arrange
+        let from_port = Some(-1);
+        let to_port = Some(-1);
+
+        // Act
+        let result = build_port_range("sg-0example", "port_range", "icmp", from_port, to_port)
+            .unwrap_or_else(|error| panic!("expected Ok: {error}"));
+
+        // Assert
+        assert_eq!(result, None);
+    }
 }
