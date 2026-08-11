@@ -160,4 +160,39 @@ pub enum IngestError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// A `Describe*` response could not be mapped into a `core::domain`
+    /// type. See [`MappingError`].
+    #[error("failed to map a describe response into a domain type: {source}")]
+    Mapping {
+        #[source]
+        source: MappingError,
+    },
+}
+
+/// Errors raised while mapping `aws_sdk_ec2::types::*` values into
+/// `core::domain` types (see [`crate::ingest::map`]).
+///
+/// Reserved for structurally malformed input — a required field absent, a
+/// port range with `from > to`, a numeric field that overflows its domain
+/// type. An unresolvable cross-account security-group reference is *not*
+/// malformed: it is mapped with `resolved: false` and `Ok`, never this
+/// error — see `SgRule::resolved` in `crate::domain::rule`.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum MappingError {
+    /// A field on the given resource was missing, out of range, or
+    /// otherwise could not be mapped into the corresponding `core::domain`
+    /// value.
+    #[error("resource {resource_id}: field `{field}` is invalid: {reason}")]
+    InvalidField {
+        /// The AWS resource id the offending field belongs to (e.g. a
+        /// security group id or network ACL id).
+        resource_id: String,
+        /// The field path within the SDK type, e.g. `"port_range"` or
+        /// `"user_id_group_pairs[].group_id"`.
+        field: &'static str,
+        /// Human-readable reason the field could not be mapped.
+        reason: String,
+    },
 }
