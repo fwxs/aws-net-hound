@@ -110,6 +110,17 @@ response. Uniqueness constraints on this key, and indexes on `account_id` /
 | `cidr_block`        | String | yes      | `CidrBlock`                                  |
 | `availability_zone` | String | yes      | `AvailabilityZone`                           |
 
+`cidr_block` and `availability_zone` have no data source until a
+`DescribeSubnets` collector exists (a later milestone) — `crate::ingest`
+only collects `DescribeSecurityGroups`/`DescribeNetworkAcls`/
+`DescribeRouteTables`/`DescribeNetworkInterfaces`/`DescribeVpcPeeringConnections`.
+Until then, `topology.rs::build_graph_batch` (M1-T4) emits `Subnet` nodes
+synthesized from `subnet_id` sightings on `NetworkInterface`/
+`NetworkAclAssociation`/`RouteTableAssociation`, with these two fields as
+empty strings. `vpc_id` is **not** part of this gap: AWS guarantees a
+NACL's/route table's/ENI's own `vpc_id` matches its associated subnet's
+VPC, so it is reliably inferred without a `Subnet` API call.
+
 ### `VPC`
 
 | Property     | Type   | Required | Source                            |
@@ -117,6 +128,12 @@ response. Uniqueness constraints on this key, and indexes on `account_id` /
 | `id`         | String | yes (key)| `VpcId`, e.g. `vpc-0example`         |
 | `account_id` | String | yes      | ingestion context                   |
 | `cidr_block` | String | yes      | `CidrBlock`                         |
+
+`cidr_block` has the same gap as `Subnet.cidr_block` above: no
+`DescribeVpcs` collector exists yet, so `topology.rs::build_graph_batch`
+emits it as an empty string, deriving the node itself from `vpc_id`
+sightings across the five collectors it does have (ENI, SecurityGroup,
+NetworkACL, RouteTable, and the same-account side of VpcPeeringConnection).
 
 ### `RouteTable`
 
@@ -174,6 +191,20 @@ the target does not resolve to a modeled node).
 | Edge (cont.) | Properties (cont.) |
 |---|---|
 | `ROUTES_TO` | `resolved: bool` — `false` when the destination is outside the modeled node types |
+
+A route table association with `main: true` and no explicit `subnet_id`
+(AWS's implicit form, covering every subnet in the VPC not explicitly
+associated elsewhere) is recorded via `RouteTable.is_main = true` on the
+node itself, not as a `USES_ROUTE_TABLE` edge — there is no concrete subnet
+to key that edge on without a `DescribeSubnets` collector (see `Subnet`'s
+gap note above). A later milestone that adds subnet enumeration can
+retroactively emit the implied edges once every subnet in the VPC is known.
+
+A route whose only destination is a `destination_prefix_list_id` (no
+`destination_cidr_block`/`destination_ipv6_cidr_block`, e.g. a gateway VPC
+endpoint route) is not modeled in this milestone and produces no
+`ROUTES_TO` edge — there is no CIDR to key the edge's required
+`destination_cidr` on.
 
 ### Evaluable rules
 
