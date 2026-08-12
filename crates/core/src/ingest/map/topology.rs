@@ -86,17 +86,27 @@ pub fn build_graph_batch(
         .into_values()
         .collect();
 
-    let mut edges = has_sg_edges(network_interfaces)?;
-    edges.extend(in_subnet_edges(network_interfaces)?);
-    edges.extend(protected_by_edges(network_acls)?);
-    edges.extend(uses_route_table_edges(route_tables)?);
+    // Every `*_edges` helper below is handed the node records built above
+    // instead of re-deriving/re-validating each id from the raw SDK type:
+    // `map_eni_node`/etc. already validated it once, and `zip`ping is sound
+    // because each `Vec` of records was built via a straight, unfiltered
+    // `.map()` over its corresponding raw slice — same length, same order.
+    let mut edges = has_sg_edges(network_interfaces, &enis)?;
+    edges.extend(in_subnet_edges(&enis));
+    edges.extend(protected_by_edges(network_acls, &network_acl_records));
+    edges.extend(uses_route_table_edges(route_tables, &route_table_records));
     edges.extend(routes_to_edges(
         account_id,
         route_tables,
+        &route_table_records,
         vpc_peering_connections,
+    ));
+    edges.extend(allows_edges(
+        security_groups,
+        &security_group_records,
+        account_id,
     )?);
-    edges.extend(allows_edges(security_groups, account_id)?);
-    edges.extend(has_rule_edges(network_acls)?);
+    edges.extend(has_rule_edges(network_acls, &network_acl_records)?);
 
     Ok(GraphBatch {
         enis,
@@ -196,64 +206,68 @@ fn map_route_table_node(
     })
 }
 
-/// `HAS_SG`: sole source of truth is `NetworkInterface.groups`.
-fn has_sg_edges(network_interfaces: &[NetworkInterface]) -> Result<Vec<Edge>, MappingError> {
-    let mut edges = Vec::new();
-    for eni in network_interfaces {
-        let eni_id = require_str(
-            "<unknown ENI>",
-            "network_interface_id",
-            &eni.network_interface_id,
-        )?;
-        for group in eni.groups() {
-            let security_group_id =
-                require_str(eni_id, "groups[].group_id", &group.group_id)?.to_string();
-            edges.push(Edge::HasSg(HasSgEdge {
-                eni_id: eni_id.to_string(),
-                security_group_id,
-            }));
-        }
-    }
-    Ok(edges)
-}
-
-/// `IN_SUBNET`: sole source of truth is `NetworkInterface.subnet_id`.
-fn in_subnet_edges(network_interfaces: &[NetworkInterface]) -> Result<Vec<Edge>, MappingError> {
+/// `HAS_SG`: sole source of truth is `NetworkInterface.groups`. `enis` is
+/// `network_interfaces` mapped 1:1 through [`map_eni_node`] — zipping reuses
+/// each ENI's already-validated id instead of re-validating it here.
+fn has_sg_edges(
+    network_interfaces: &[NetworkInterface],
+    enis: &[EniRecord],
+) -> Result<Vec<Edge>, MappingError> {
     network_interfaces
         .iter()
+        .zip(enis)
+        .map(|(eni, record)| {
+            eni.groups()
+                .iter()
+                .map(|group| {
+                    let security_group_id =
+                        require_str(&record.id, "groups[].group_id", &group.group_id)?.to_string();
+                    Ok(Edge::HasSg(HasSgEdge {
+                        eni_id: record.id.clone(),
+                        security_group_id,
+                    }))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<Vec<_>>, _>>()
+        .map(|nested| nested.into_iter().flatten().collect())
+}
+
+/// `IN_SUBNET`: sole source of truth is `NetworkInterface.subnet_id`,
+/// already carried on each already-validated [`EniRecord`] — no raw SDK
+/// access or re-validation needed here.
+fn in_subnet_edges(enis: &[EniRecord]) -> Vec<Edge> {
+    enis.iter()
         .map(|eni| {
-            let eni_id = require_str(
-                "<unknown ENI>",
-                "network_interface_id",
-                &eni.network_interface_id,
-            )?
-            .to_string();
-            let subnet_id = require_str(&eni_id, "subnet_id", &eni.subnet_id)?.to_string();
-            Ok(Edge::InSubnet(InSubnetEdge { eni_id, subnet_id }))
+            Edge::InSubnet(InSubnetEdge {
+                eni_id: eni.id.clone(),
+                subnet_id: eni.subnet_id.clone(),
+            })
         })
         .collect()
 }
 
 /// `PROTECTED_BY`: sole source of truth is `NetworkAcl.associations[].subnet_id`.
-fn protected_by_edges(network_acls: &[NetworkAcl]) -> Result<Vec<Edge>, MappingError> {
-    let mut edges = Vec::new();
-    for acl in network_acls {
-        let network_acl_id = require_str(
-            "<unknown network acl>",
-            "network_acl_id",
-            &acl.network_acl_id,
-        )?
-        .to_string();
-        for association in acl.associations() {
-            if let Some(subnet_id) = association.subnet_id.clone() {
-                edges.push(Edge::ProtectedBy(ProtectedByEdge {
-                    subnet_id,
-                    network_acl_id: network_acl_id.clone(),
-                }));
-            }
-        }
-    }
-    Ok(edges)
+/// `network_acl_records` is `network_acls` mapped 1:1 through
+/// [`map_network_acl_node`] — zipping reuses each ACL's already-validated id.
+fn protected_by_edges(
+    network_acls: &[NetworkAcl],
+    network_acl_records: &[NetworkAclRecord],
+) -> Vec<Edge> {
+    network_acls
+        .iter()
+        .zip(network_acl_records)
+        .flat_map(|(acl, record)| {
+            acl.associations().iter().filter_map(move |association| {
+                association.subnet_id.clone().map(|subnet_id| {
+                    Edge::ProtectedBy(ProtectedByEdge {
+                        subnet_id,
+                        network_acl_id: record.id.clone(),
+                    })
+                })
+            })
+        })
+        .collect()
 }
 
 /// `USES_ROUTE_TABLE`: sole source of truth is
@@ -261,69 +275,67 @@ fn protected_by_edges(network_acls: &[NetworkAcl]) -> Result<Vec<Edge>, MappingE
 /// is AWS's implicit main-table association (no concrete subnet to key the
 /// edge on) — it emits no edge here. The route table is not dropped: its
 /// `is_main` flag (set in [`map_route_table_node`]) records the fact on the
-/// node itself. See `schema.md`'s `ROUTES_TO` footnote.
-fn uses_route_table_edges(route_tables: &[RouteTable]) -> Result<Vec<Edge>, MappingError> {
-    let mut edges = Vec::new();
-    for route_table in route_tables {
-        let route_table_id = require_str(
-            "<unknown route table>",
-            "route_table_id",
-            &route_table.route_table_id,
-        )?
-        .to_string();
-        for association in route_table.associations() {
-            if let Some(subnet_id) = association.subnet_id.clone() {
-                edges.push(Edge::UsesRouteTable(UsesRouteTableEdge {
-                    subnet_id,
-                    route_table_id: route_table_id.clone(),
-                }));
-            }
-        }
-    }
-    Ok(edges)
+/// node itself. See `schema.md`'s `ROUTES_TO` footnote. `route_table_records`
+/// is `route_tables` mapped 1:1 through [`map_route_table_node`] — zipping
+/// reuses each route table's already-validated id.
+fn uses_route_table_edges(
+    route_tables: &[RouteTable],
+    route_table_records: &[RouteTableRecord],
+) -> Vec<Edge> {
+    route_tables
+        .iter()
+        .zip(route_table_records)
+        .flat_map(|(route_table, record)| {
+            route_table
+                .associations()
+                .iter()
+                .filter_map(move |association| {
+                    association.subnet_id.clone().map(|subnet_id| {
+                        Edge::UsesRouteTable(UsesRouteTableEdge {
+                            subnet_id,
+                            route_table_id: record.id.clone(),
+                        })
+                    })
+                })
+        })
+        .collect()
 }
 
 /// `ROUTES_TO`: sole source of truth is `RouteTable.routes[]`. A route with
 /// neither `destination_cidr_block` nor `destination_ipv6_cidr_block` (e.g.
 /// a `destination_prefix_list_id`-only endpoint route) has no CIDR to key
 /// the edge's required `destination_cidr` on and is skipped — documented in
-/// `schema.md`.
+/// `schema.md`. `route_table_records` is `route_tables` mapped 1:1 through
+/// [`map_route_table_node`] — zipping reuses each route table's
+/// already-validated id and `vpc_id`.
 fn routes_to_edges(
     account_id: &str,
     route_tables: &[RouteTable],
+    route_table_records: &[RouteTableRecord],
     peerings: &[VpcPeeringConnection],
-) -> Result<Vec<Edge>, MappingError> {
-    let mut edges = Vec::new();
-    for route_table in route_tables {
-        let route_table_id = require_str(
-            "<unknown route table>",
-            "route_table_id",
-            &route_table.route_table_id,
-        )?
-        .to_string();
-        let rt_vpc_id = require_str(&route_table_id, "vpc_id", &route_table.vpc_id)?;
+) -> Vec<Edge> {
+    route_tables
+        .iter()
+        .zip(route_table_records)
+        .flat_map(|(route_table, record)| {
+            route_table.routes().iter().filter_map(move |route| {
+                let destination_cidr = route
+                    .destination_cidr_block
+                    .clone()
+                    .or_else(|| route.destination_ipv6_cidr_block.clone())?;
 
-        for route in route_table.routes() {
-            let Some(destination_cidr) = route
-                .destination_cidr_block
-                .clone()
-                .or_else(|| route.destination_ipv6_cidr_block.clone())
-            else {
-                continue;
-            };
+                let (target_vpc_id, resolved) =
+                    resolve_route_target(account_id, &record.vpc_id, route, peerings);
 
-            let (target_vpc_id, resolved) =
-                resolve_route_target(account_id, rt_vpc_id, route, peerings);
-
-            edges.push(Edge::RoutesTo(RoutesToEdge {
-                route_table_id: route_table_id.clone(),
-                destination_cidr,
-                target_vpc_id,
-                resolved,
-            }));
-        }
-    }
-    Ok(edges)
+                Some(Edge::RoutesTo(RoutesToEdge {
+                    route_table_id: record.id.clone(),
+                    destination_cidr,
+                    target_vpc_id,
+                    resolved,
+                }))
+            })
+        })
+        .collect()
 }
 
 /// Resolves a single route's target: `"local"` gateway resolves to the
@@ -369,49 +381,61 @@ fn resolve_route_target(
 }
 
 /// `ALLOWS_INGRESS`/`ALLOWS_EGRESS`: sole source of truth is
-/// [`map_security_group_rules`] (M1-T3).
+/// [`map_security_group_rules`] (M1-T3). `security_group_records` is
+/// `security_groups` mapped 1:1 through [`map_security_group_node`] —
+/// zipping reuses each SG's already-validated id.
 fn allows_edges(
     security_groups: &[SecurityGroup],
+    security_group_records: &[SecurityGroupRecord],
     account_id: &str,
 ) -> Result<Vec<Edge>, MappingError> {
-    let mut edges = Vec::new();
-    for sg in security_groups {
-        let security_group_id =
-            require_str("<unknown security group>", "group_id", &sg.group_id)?.to_string();
-        for rule in map_security_group_rules(sg, account_id)? {
-            edges.push(match rule.direction {
-                Direction::Ingress => Edge::AllowsIngress {
-                    security_group_id: security_group_id.clone(),
-                    rule,
-                },
-                Direction::Egress => Edge::AllowsEgress {
-                    security_group_id: security_group_id.clone(),
-                    rule,
-                },
-            });
-        }
-    }
-    Ok(edges)
+    security_groups
+        .iter()
+        .zip(security_group_records)
+        .map(|(sg, record)| {
+            map_security_group_rules(sg, account_id).map(|rules| {
+                rules
+                    .into_iter()
+                    .map(|rule| match rule.direction {
+                        Direction::Ingress => Edge::AllowsIngress {
+                            security_group_id: record.id.clone(),
+                            rule,
+                        },
+                        Direction::Egress => Edge::AllowsEgress {
+                            security_group_id: record.id.clone(),
+                            rule,
+                        },
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect::<Result<Vec<Vec<_>>, _>>()
+        .map(|nested| nested.into_iter().flatten().collect())
 }
 
 /// `HAS_RULE`: sole source of truth is [`map_network_acl_rules`] (M1-T3).
-fn has_rule_edges(network_acls: &[NetworkAcl]) -> Result<Vec<Edge>, MappingError> {
-    let mut edges = Vec::new();
-    for acl in network_acls {
-        let network_acl_id = require_str(
-            "<unknown network acl>",
-            "network_acl_id",
-            &acl.network_acl_id,
-        )?
-        .to_string();
-        for rule in map_network_acl_rules(acl)? {
-            edges.push(Edge::HasRule {
-                network_acl_id: network_acl_id.clone(),
-                rule,
-            });
-        }
-    }
-    Ok(edges)
+/// `network_acl_records` is `network_acls` mapped 1:1 through
+/// [`map_network_acl_node`] — zipping reuses each ACL's already-validated id.
+fn has_rule_edges(
+    network_acls: &[NetworkAcl],
+    network_acl_records: &[NetworkAclRecord],
+) -> Result<Vec<Edge>, MappingError> {
+    network_acls
+        .iter()
+        .zip(network_acl_records)
+        .map(|(acl, record)| {
+            map_network_acl_rules(acl).map(|rules| {
+                rules
+                    .into_iter()
+                    .map(|rule| Edge::HasRule {
+                        network_acl_id: record.id.clone(),
+                        rule,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect::<Result<Vec<Vec<_>>, _>>()
+        .map(|nested| nested.into_iter().flatten().collect())
 }
 
 fn insert_vpc_stub(vpcs: &mut BTreeMap<String, VpcRecord>, account_id: &str, vpc_id: String) {
