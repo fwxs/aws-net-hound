@@ -7,6 +7,7 @@
 
 pub mod nacl;
 pub mod sg;
+pub mod topology;
 
 use crate::domain::rule::{PortRange, RuleError};
 use crate::error::MappingError;
