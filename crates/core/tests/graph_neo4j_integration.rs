@@ -15,8 +15,8 @@ use aws_net_hound_core::domain::rule::{
 use aws_net_hound_core::graph::neo4j::Neo4jGraphWriter;
 use aws_net_hound_core::migrations;
 use aws_net_hound_core::ports::{
-    EniRecord, GraphWriter, HasSgEdge, NaclRuleBatch, NetworkAclRecord, SecurityGroupRecord,
-    SgRuleBatch, SubnetRecord, VpcRecord,
+    EniRecord, GraphWriter, HasSgEdge, NaclRuleBatch, NetworkAclRecord, RouteTableRecord,
+    RoutesToEdge, SecurityGroupRecord, SgRuleBatch, SubnetRecord, VpcRecord,
 };
 use neo4rs::{query, ConfigBuilder, Graph};
 use pretty_assertions::assert_eq;
@@ -140,6 +140,15 @@ fn network_acl(id: &str, vpc_id: &str) -> NetworkAclRecord {
         account_id: "123456789012".to_string(),
         vpc_id: vpc_id.to_string(),
         is_default: false,
+    }
+}
+
+fn route_table(id: &str, vpc_id: &str) -> RouteTableRecord {
+    RouteTableRecord {
+        id: id.to_string(),
+        account_id: "123456789012".to_string(),
+        vpc_id: vpc_id.to_string(),
+        is_main: false,
     }
 }
 
@@ -360,6 +369,125 @@ async fn write_sg_rule_unresolved_reference_is_queryable_with_resolved_false() {
         .expect("row streams")
         .expect("allows_egress row present");
     assert_eq!(row.get::<bool>("resolved").expect("bool value"), false);
+}
+
+#[tokio::test]
+#[ignore]
+async fn write_sg_rule_resolved_reference_to_real_group_creates_real_edge() {
+    // Arrange
+    let (_container, graph) = start_neo4j().await;
+    seed_migrations(&graph).await;
+    let writer = Neo4jGraphWriter::new(graph.clone());
+    writer
+        .upsert_security_groups(&[
+            security_group("sg-1", "vpc-1", "web"),
+            security_group("sg-2", "vpc-1", "db"),
+        ])
+        .await
+        .expect("security groups upsert");
+    let rules = vec![SgRule {
+        direction: Direction::Egress,
+        protocol: "tcp".to_string(),
+        port_range: Some(PortRange::new(5432, 5432).expect("valid port range")),
+        target: RuleTarget::SecurityGroupRef {
+            security_group_id: "sg-2".to_string(),
+        },
+        resolved: true,
+    }];
+    let batches = [SgRuleBatch {
+        security_group_id: "sg-1",
+        rules: &rules,
+    }];
+
+    // Act
+    writer
+        .upsert_allows_egress_rules(&batches)
+        .await
+        .expect("allows_egress upsert");
+
+    // Assert
+    assert_eq!(relationship_count(&graph, "ALLOWS_EGRESS").await, 1);
+    let mut stream = graph
+        .execute(query(
+            "MATCH (a:SecurityGroup {id: 'sg-1'})-[r:ALLOWS_EGRESS]->(b:SecurityGroup) \
+             RETURN b.id AS target_id",
+        ))
+        .await
+        .expect("allows_egress query succeeds");
+    let row = stream
+        .next()
+        .await
+        .expect("row streams")
+        .expect("allows_egress row present");
+    assert_eq!(
+        row.get::<String>("target_id").expect("string value"),
+        "sg-2"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn write_sg_rule_resolved_reference_to_missing_group_returns_graph_write_error() {
+    // Arrange
+    let (_container, graph) = start_neo4j().await;
+    seed_migrations(&graph).await;
+    let writer = Neo4jGraphWriter::new(graph.clone());
+    writer
+        .upsert_security_groups(&[security_group("sg-1", "vpc-1", "web")])
+        .await
+        .expect("security group upsert");
+    // "sg-missing" is never upserted, but resolved: true claims it exists.
+    let rules = vec![SgRule {
+        direction: Direction::Egress,
+        protocol: "tcp".to_string(),
+        port_range: Some(PortRange::new(5432, 5432).expect("valid port range")),
+        target: RuleTarget::SecurityGroupRef {
+            security_group_id: "sg-missing".to_string(),
+        },
+        resolved: true,
+    }];
+    let batches = [SgRuleBatch {
+        security_group_id: "sg-1",
+        rules: &rules,
+    }];
+
+    // Act
+    let result = writer.upsert_allows_egress_rules(&batches).await;
+
+    // Assert
+    let error = result.expect_err("resolved reference to a missing group should error");
+    assert!(error.to_string().contains("ALLOWS_EGRESS"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn write_routes_to_edge_with_inconsistent_resolved_and_target_returns_graph_write_error() {
+    // Arrange
+    let (_container, graph) = start_neo4j().await;
+    seed_migrations(&graph).await;
+    let writer = Neo4jGraphWriter::new(graph.clone());
+    writer
+        .upsert_vpcs(&[vpc("vpc-1")])
+        .await
+        .expect("vpc upsert");
+    writer
+        .upsert_route_tables(&[route_table("rtb-1", "vpc-1")])
+        .await
+        .expect("route table upsert");
+    // Inconsistent: target_vpc_id is Some (claims resolved) but resolved is false.
+    let edges = [RoutesToEdge {
+        route_table_id: "rtb-1".to_string(),
+        destination_cidr: "10.0.0.0/16".to_string(),
+        target_vpc_id: Some("vpc-1".to_string()),
+        resolved: false,
+    }];
+
+    // Act
+    let result = writer.upsert_routes_to_edges(&edges).await;
+
+    // Assert
+    let error = result.expect_err("inconsistent resolved/target_vpc_id should error");
+    assert!(error.to_string().contains("ROUTES_TO"));
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use neo4rs::{query, BoltType, Graph};
 use tracing::{debug, info};
 
-use crate::domain::rule::{Direction, RuleTarget};
+use crate::domain::rule::{Direction, PortRange, RuleTarget};
 use crate::error::GraphWriteError;
 use crate::graph::model::Edge;
 use crate::ports::{
@@ -43,14 +43,14 @@ impl Neo4jGraphWriter {
     async fn run_node_upsert(
         &self,
         label: &'static str,
-        cypher: &'static str,
         rows: Vec<Row>,
     ) -> Result<(), GraphWriteError> {
+        let cypher = node_upsert_query(label);
         let total = rows.len();
         for chunk in chunk_rows(&rows, BATCH_SIZE) {
             debug!(label, chunk_len = chunk.len(), "running node upsert");
             self.graph
-                .run(query(cypher).param("rows", chunk.to_vec()))
+                .run(query(&cypher).param("rows", chunk.to_vec()))
                 .await
                 .map_err(|source| GraphWriteError::Write {
                     source: Box::new(source),
@@ -65,7 +65,15 @@ impl Neo4jGraphWriter {
     /// were merged than rows were sent — the signal that at least one row's
     /// endpoint(s) did not resolve to an existing node. `MATCH` + `MERGE`
     /// otherwise fails silently (zero rows matched, no Cypher error), so
-    /// this count comparison is the only way to detect it.
+    /// this count comparison is how a plain `MATCH`+`MERGE` shape (every
+    /// topology edge, `ROUTES_TO_RESOLVED_UPSERT`, and the
+    /// `..._SG_REF_RESOLVED_UPSERT` queries) surfaces a genuinely missing
+    /// endpoint. It does **not** apply to the self-loop shapes
+    /// (`ROUTES_TO_UNRESOLVED_UPSERT`, the CIDR-target `ALLOWS_*` queries,
+    /// and `..._SG_REF_UNRESOLVED_UPSERT`) — those always merge onto the
+    /// source node by construction and never fail this check; whether a
+    /// destination legitimately doesn't exist is decided by the caller
+    /// before choosing which query to run, not by this count.
     async fn run_edge_upsert(
         &self,
         edge_type: &'static str,
@@ -141,143 +149,101 @@ fn props_map(entries: Vec<(&str, BoltType)>) -> BoltType {
 // --- Node row builders -----------------------------------------------------
 //
 // Merge key: `id`. Every other field is set unconditionally on the merged
-// node via `SET n += row.props`.
+// node via `SET n += row.props`. Every node label shares the identical
+// `MERGE (n:LABEL {id: row.id}) SET n += row.props` template, so the query
+// string is built once by `node_upsert_query` rather than duplicated as a
+// `const` per label.
 
-const ENI_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:ENI {id: row.id})
-SET n += row.props";
+fn node_upsert_query(label: &str) -> String {
+    format!("UNWIND $rows AS row\nMERGE (n:{label} {{id: row.id}})\nSET n += row.props")
+}
+
+fn node_row(id: &str, props: Vec<(&str, BoltType)>) -> Row {
+    HashMap::from([
+        ("id".to_string(), string_prop(id)),
+        ("props".to_string(), props_map(props)),
+    ])
+}
 
 fn eni_row(record: &EniRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("vpc_id", string_prop(&record.vpc_id)),
-                ("subnet_id", string_prop(&record.subnet_id)),
-                ("private_ip", string_prop(&record.private_ip)),
-                ("description", opt_string_prop(&record.description)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("vpc_id", string_prop(&record.vpc_id)),
+            ("subnet_id", string_prop(&record.subnet_id)),
+            ("private_ip", string_prop(&record.private_ip)),
+            ("description", opt_string_prop(&record.description)),
+        ],
+    )
 }
-
-const SECURITY_GROUP_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:SecurityGroup {id: row.id})
-SET n += row.props";
 
 fn security_group_row(record: &SecurityGroupRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("vpc_id", string_prop(&record.vpc_id)),
-                ("name", string_prop(&record.name)),
-                ("description", opt_string_prop(&record.description)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("vpc_id", string_prop(&record.vpc_id)),
+            ("name", string_prop(&record.name)),
+            ("description", opt_string_prop(&record.description)),
+        ],
+    )
 }
-
-const NETWORK_ACL_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:NetworkACL {id: row.id})
-SET n += row.props";
 
 fn network_acl_row(record: &NetworkAclRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("vpc_id", string_prop(&record.vpc_id)),
-                ("is_default", bool_prop(record.is_default)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("vpc_id", string_prop(&record.vpc_id)),
+            ("is_default", bool_prop(record.is_default)),
+        ],
+    )
 }
-
-const SUBNET_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:Subnet {id: row.id})
-SET n += row.props";
 
 fn subnet_row(record: &SubnetRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("vpc_id", string_prop(&record.vpc_id)),
-                ("cidr_block", string_prop(&record.cidr_block)),
-                ("availability_zone", string_prop(&record.availability_zone)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("vpc_id", string_prop(&record.vpc_id)),
+            ("cidr_block", string_prop(&record.cidr_block)),
+            ("availability_zone", string_prop(&record.availability_zone)),
+        ],
+    )
 }
-
-const VPC_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:VPC {id: row.id})
-SET n += row.props";
 
 fn vpc_row(record: &VpcRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("cidr_block", string_prop(&record.cidr_block)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("cidr_block", string_prop(&record.cidr_block)),
+        ],
+    )
 }
-
-const ROUTE_TABLE_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:RouteTable {id: row.id})
-SET n += row.props";
 
 fn route_table_row(record: &RouteTableRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("vpc_id", string_prop(&record.vpc_id)),
-                ("is_main", bool_prop(record.is_main)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("vpc_id", string_prop(&record.vpc_id)),
+            ("is_main", bool_prop(record.is_main)),
+        ],
+    )
 }
 
-const REGULATED_BOUNDARY_UPSERT: &str = "\
-UNWIND $rows AS row
-MERGE (n:RegulatedBoundary {id: row.id})
-SET n += row.props";
-
 fn regulated_boundary_row(record: &RegulatedBoundaryRecord) -> Row {
-    HashMap::from([
-        ("id".to_string(), string_prop(&record.id)),
-        (
-            "props".to_string(),
-            props_map(vec![
-                ("account_id", string_prop(&record.account_id)),
-                ("name", string_prop(&record.name)),
-                ("regime", string_prop(&record.regime)),
-                ("description", opt_string_prop(&record.description)),
-            ]),
-        ),
-    ])
+    node_row(
+        &record.id,
+        vec![
+            ("account_id", string_prop(&record.account_id)),
+            ("name", string_prop(&record.name)),
+            ("regime", string_prop(&record.regime)),
+            ("description", opt_string_prop(&record.description)),
+        ],
+    )
 }
 
 // --- Topology edge row builders --------------------------------------------
@@ -419,11 +385,14 @@ MERGE (a)-[r:ALLOWS_EGRESS {
 SET r.resolved = row.resolved
 RETURN count(r) AS merged";
 
-const ALLOWS_EGRESS_SG_REF_UPSERT: &str = "\
+// `resolved: true` rows: a plain `MATCH` on the target — if the referenced
+// security group is genuinely missing (not the expected cross-account
+// case), the pattern fails to bind and `run_edge_upsert`'s count check
+// correctly reports it as an error.
+const ALLOWS_EGRESS_SG_REF_RESOLVED_UPSERT: &str = "\
 UNWIND $rows AS row
 MATCH (a:SecurityGroup {id: row.security_group_id})
-OPTIONAL MATCH (target:SecurityGroup {id: row.target_security_group_id})
-WITH a, row, coalesce(target, a) AS b
+MATCH (b:SecurityGroup {id: row.target_security_group_id})
 MERGE (a)-[r:ALLOWS_EGRESS {
     protocol: row.protocol,
     from_port: row.from_port,
@@ -431,6 +400,22 @@ MERGE (a)-[r:ALLOWS_EGRESS {
     target_kind: row.target_kind,
     target_security_group_id: row.target_security_group_id
 }]->(b)
+SET r.resolved = row.resolved
+RETURN count(r) AS merged";
+
+// `resolved: false` rows: the reference is known to be unresolvable (e.g.
+// cross-account in local-audit mode), so this always self-loops on the
+// source — never a `MATCH` on the target, since there is nothing to match.
+const ALLOWS_EGRESS_SG_REF_UNRESOLVED_UPSERT: &str = "\
+UNWIND $rows AS row
+MATCH (a:SecurityGroup {id: row.security_group_id})
+MERGE (a)-[r:ALLOWS_EGRESS {
+    protocol: row.protocol,
+    from_port: row.from_port,
+    to_port: row.to_port,
+    target_kind: row.target_kind,
+    target_security_group_id: row.target_security_group_id
+}]->(a)
 SET r.resolved = row.resolved
 RETURN count(r) AS merged";
 
@@ -447,11 +432,11 @@ MERGE (a)-[r:ALLOWS_INGRESS {
 SET r.resolved = row.resolved
 RETURN count(r) AS merged";
 
-const ALLOWS_INGRESS_SG_REF_UPSERT: &str = "\
+// See the egress `_RESOLVED_UPSERT`'s comment — same shape, `ALLOWS_INGRESS`.
+const ALLOWS_INGRESS_SG_REF_RESOLVED_UPSERT: &str = "\
 UNWIND $rows AS row
 MATCH (a:SecurityGroup {id: row.security_group_id})
-OPTIONAL MATCH (target:SecurityGroup {id: row.target_security_group_id})
-WITH a, row, coalesce(target, a) AS b
+MATCH (b:SecurityGroup {id: row.target_security_group_id})
 MERGE (a)-[r:ALLOWS_INGRESS {
     protocol: row.protocol,
     from_port: row.from_port,
@@ -462,8 +447,22 @@ MERGE (a)-[r:ALLOWS_INGRESS {
 SET r.resolved = row.resolved
 RETURN count(r) AS merged";
 
-fn port_range_props(rule: &crate::domain::rule::SgRule) -> (BoltType, BoltType) {
-    match rule.port_range {
+// See the egress `_UNRESOLVED_UPSERT`'s comment — same shape, `ALLOWS_INGRESS`.
+const ALLOWS_INGRESS_SG_REF_UNRESOLVED_UPSERT: &str = "\
+UNWIND $rows AS row
+MATCH (a:SecurityGroup {id: row.security_group_id})
+MERGE (a)-[r:ALLOWS_INGRESS {
+    protocol: row.protocol,
+    from_port: row.from_port,
+    to_port: row.to_port,
+    target_kind: row.target_kind,
+    target_security_group_id: row.target_security_group_id
+}]->(a)
+SET r.resolved = row.resolved
+RETURN count(r) AS merged";
+
+fn port_range_props(port_range: Option<PortRange>) -> (BoltType, BoltType) {
+    match port_range {
         Some(range) => (
             BoltType::from(i64::from(range.from_port())),
             BoltType::from(i64::from(range.to_port())),
@@ -480,7 +479,7 @@ fn sg_rule_cidr_row(
     rule: &crate::domain::rule::SgRule,
     cidr: &str,
 ) -> Row {
-    let (from_port, to_port) = port_range_props(rule);
+    let (from_port, to_port) = port_range_props(rule.port_range);
     HashMap::from([
         (
             "security_group_id".to_string(),
@@ -500,7 +499,7 @@ fn sg_rule_sg_ref_row(
     rule: &crate::domain::rule::SgRule,
     target_security_group_id: &str,
 ) -> Row {
-    let (from_port, to_port) = port_range_props(rule);
+    let (from_port, to_port) = port_range_props(rule.port_range);
     HashMap::from([
         (
             "security_group_id".to_string(),
@@ -520,10 +519,15 @@ fn sg_rule_sg_ref_row(
 
 /// Splits `batches` into CIDR-targeted rows and security-group-ref-targeted
 /// rows, since the two share no Cypher shape (see `schema.md`'s "Evaluable
-/// rules" — target is mutually exclusive).
-fn split_sg_rule_rows(batches: &[SgRuleBatch<'_>]) -> (Vec<Row>, Vec<Row>) {
+/// rules" — target is mutually exclusive). SG-ref rows are further split by
+/// `rule.resolved`: a resolved reference must `MATCH` a real target node (a
+/// genuinely missing target is a write error), while an unresolved
+/// reference is known unresolvable and always self-loops — see the
+/// `_RESOLVED_UPSERT`/`_UNRESOLVED_UPSERT` query comments.
+fn split_sg_rule_rows(batches: &[SgRuleBatch<'_>]) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
     let mut cidr_rows = Vec::new();
-    let mut sg_ref_rows = Vec::new();
+    let mut sg_ref_resolved_rows = Vec::new();
+    let mut sg_ref_unresolved_rows = Vec::new();
     for batch in batches {
         for rule in batch.rules {
             match &rule.target {
@@ -531,16 +535,17 @@ fn split_sg_rule_rows(batches: &[SgRuleBatch<'_>]) -> (Vec<Row>, Vec<Row>) {
                     cidr_rows.push(sg_rule_cidr_row(batch.security_group_id, rule, cidr));
                 }
                 RuleTarget::SecurityGroupRef { security_group_id } => {
-                    sg_ref_rows.push(sg_rule_sg_ref_row(
-                        batch.security_group_id,
-                        rule,
-                        security_group_id,
-                    ));
+                    let row = sg_rule_sg_ref_row(batch.security_group_id, rule, security_group_id);
+                    if rule.resolved {
+                        sg_ref_resolved_rows.push(row);
+                    } else {
+                        sg_ref_unresolved_rows.push(row);
+                    }
                 }
             }
         }
     }
-    (cidr_rows, sg_ref_rows)
+    (cidr_rows, sg_ref_resolved_rows, sg_ref_unresolved_rows)
 }
 
 // --- HAS_RULE ---------------------------------------------------------------
@@ -563,16 +568,7 @@ SET r.direction = row.direction,
 RETURN count(r) AS merged";
 
 fn nacl_rule_row(network_acl_id: &str, rule: &crate::domain::rule::NaclRule) -> Row {
-    let (from_port, to_port) = match rule.port_range {
-        Some(range) => (
-            BoltType::from(i64::from(range.from_port())),
-            BoltType::from(i64::from(range.to_port())),
-        ),
-        None => (
-            BoltType::Null(neo4rs::BoltNull),
-            BoltType::Null(neo4rs::BoltNull),
-        ),
-    };
+    let (from_port, to_port) = port_range_props(rule.port_range);
     let direction = match rule.direction {
         Direction::Ingress => "ingress",
         Direction::Egress => "egress",
@@ -599,7 +595,7 @@ fn nacl_rule_row(network_acl_id: &str, rule: &crate::domain::rule::NaclRule) -> 
 impl GraphWriter for Neo4jGraphWriter {
     fn upsert_enis(&self, enis: &[EniRecord]) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = enis.iter().map(eni_row).collect();
-        Box::pin(async move { self.run_node_upsert("ENI", ENI_UPSERT, rows).await })
+        Box::pin(async move { self.run_node_upsert("ENI", rows).await })
     }
 
     fn upsert_security_groups(
@@ -607,10 +603,7 @@ impl GraphWriter for Neo4jGraphWriter {
         security_groups: &[SecurityGroupRecord],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = security_groups.iter().map(security_group_row).collect();
-        Box::pin(async move {
-            self.run_node_upsert("SecurityGroup", SECURITY_GROUP_UPSERT, rows)
-                .await
-        })
+        Box::pin(async move { self.run_node_upsert("SecurityGroup", rows).await })
     }
 
     fn upsert_network_acls(
@@ -618,10 +611,7 @@ impl GraphWriter for Neo4jGraphWriter {
         network_acls: &[NetworkAclRecord],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = network_acls.iter().map(network_acl_row).collect();
-        Box::pin(async move {
-            self.run_node_upsert("NetworkACL", NETWORK_ACL_UPSERT, rows)
-                .await
-        })
+        Box::pin(async move { self.run_node_upsert("NetworkACL", rows).await })
     }
 
     fn upsert_subnets(
@@ -629,12 +619,12 @@ impl GraphWriter for Neo4jGraphWriter {
         subnets: &[SubnetRecord],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = subnets.iter().map(subnet_row).collect();
-        Box::pin(async move { self.run_node_upsert("Subnet", SUBNET_UPSERT, rows).await })
+        Box::pin(async move { self.run_node_upsert("Subnet", rows).await })
     }
 
     fn upsert_vpcs(&self, vpcs: &[VpcRecord]) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = vpcs.iter().map(vpc_row).collect();
-        Box::pin(async move { self.run_node_upsert("VPC", VPC_UPSERT, rows).await })
+        Box::pin(async move { self.run_node_upsert("VPC", rows).await })
     }
 
     fn upsert_route_tables(
@@ -642,10 +632,7 @@ impl GraphWriter for Neo4jGraphWriter {
         route_tables: &[RouteTableRecord],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = route_tables.iter().map(route_table_row).collect();
-        Box::pin(async move {
-            self.run_node_upsert("RouteTable", ROUTE_TABLE_UPSERT, rows)
-                .await
-        })
+        Box::pin(async move { self.run_node_upsert("RouteTable", rows).await })
     }
 
     fn upsert_regulated_boundaries(
@@ -653,10 +640,7 @@ impl GraphWriter for Neo4jGraphWriter {
         boundaries: &[RegulatedBoundaryRecord],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let rows = boundaries.iter().map(regulated_boundary_row).collect();
-        Box::pin(async move {
-            self.run_node_upsert("RegulatedBoundary", REGULATED_BOUNDARY_UPSERT, rows)
-                .await
-        })
+        Box::pin(async move { self.run_node_upsert("RegulatedBoundary", rows).await })
     }
 
     fn upsert_has_sg_edges(
@@ -706,13 +690,30 @@ impl GraphWriter for Neo4jGraphWriter {
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
         let mut resolved_rows = Vec::new();
         let mut unresolved_rows = Vec::new();
+        let mut inconsistency: Option<String> = None;
         for edge in edges {
-            match &edge.target_vpc_id {
-                Some(target_vpc_id) => {
+            match (&edge.target_vpc_id, edge.resolved) {
+                (Some(target_vpc_id), true) => {
                     resolved_rows.push(routes_to_resolved_row(edge, target_vpc_id));
                 }
-                None => unresolved_rows.push(routes_to_unresolved_row(edge)),
+                (None, false) => unresolved_rows.push(routes_to_unresolved_row(edge)),
+                (target_vpc_id, resolved) => {
+                    inconsistency.get_or_insert_with(|| {
+                        format!(
+                            "ROUTES_TO edge for route_table_id={} destination_cidr={} is \
+                             inconsistent: target_vpc_id={target_vpc_id:?} but resolved={resolved}",
+                            edge.route_table_id, edge.destination_cidr
+                        )
+                    });
+                }
             }
+        }
+        if let Some(source) = inconsistency {
+            return Box::pin(async move {
+                Err(GraphWriteError::Write {
+                    source: source.into(),
+                })
+            });
         }
         Box::pin(async move {
             self.run_edge_upsert("ROUTES_TO", ROUTES_TO_RESOLVED_UPSERT, resolved_rows)
@@ -726,12 +727,22 @@ impl GraphWriter for Neo4jGraphWriter {
         &self,
         batches: &[SgRuleBatch<'_>],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
-        let (cidr_rows, sg_ref_rows) = split_sg_rule_rows(batches);
+        let (cidr_rows, sg_ref_resolved_rows, sg_ref_unresolved_rows) = split_sg_rule_rows(batches);
         Box::pin(async move {
             self.run_edge_upsert("ALLOWS_EGRESS", ALLOWS_EGRESS_CIDR_UPSERT, cidr_rows)
                 .await?;
-            self.run_edge_upsert("ALLOWS_EGRESS", ALLOWS_EGRESS_SG_REF_UPSERT, sg_ref_rows)
-                .await
+            self.run_edge_upsert(
+                "ALLOWS_EGRESS",
+                ALLOWS_EGRESS_SG_REF_RESOLVED_UPSERT,
+                sg_ref_resolved_rows,
+            )
+            .await?;
+            self.run_edge_upsert(
+                "ALLOWS_EGRESS",
+                ALLOWS_EGRESS_SG_REF_UNRESOLVED_UPSERT,
+                sg_ref_unresolved_rows,
+            )
+            .await
         })
     }
 
@@ -739,12 +750,22 @@ impl GraphWriter for Neo4jGraphWriter {
         &self,
         batches: &[SgRuleBatch<'_>],
     ) -> BoxFuture<'_, Result<(), GraphWriteError>> {
-        let (cidr_rows, sg_ref_rows) = split_sg_rule_rows(batches);
+        let (cidr_rows, sg_ref_resolved_rows, sg_ref_unresolved_rows) = split_sg_rule_rows(batches);
         Box::pin(async move {
             self.run_edge_upsert("ALLOWS_INGRESS", ALLOWS_INGRESS_CIDR_UPSERT, cidr_rows)
                 .await?;
-            self.run_edge_upsert("ALLOWS_INGRESS", ALLOWS_INGRESS_SG_REF_UPSERT, sg_ref_rows)
-                .await
+            self.run_edge_upsert(
+                "ALLOWS_INGRESS",
+                ALLOWS_INGRESS_SG_REF_RESOLVED_UPSERT,
+                sg_ref_resolved_rows,
+            )
+            .await?;
+            self.run_edge_upsert(
+                "ALLOWS_INGRESS",
+                ALLOWS_INGRESS_SG_REF_UNRESOLVED_UPSERT,
+                sg_ref_unresolved_rows,
+            )
+            .await
         })
     }
 
