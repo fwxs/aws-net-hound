@@ -4,6 +4,7 @@
 
 pub mod domain;
 pub mod error;
+pub mod evaluate;
 pub mod graph;
 pub mod ingest;
 pub mod migrations;
