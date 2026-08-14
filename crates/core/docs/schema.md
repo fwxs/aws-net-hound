@@ -186,7 +186,12 @@ any allow/deny rule is applied.
 gateway, NAT gateway, peering connection) which is out of scope for node
 modeling in this milestone and is instead recorded as `destination_cidr`
 with no destination node, plus a `resolved: bool` property (`false` when
-the target does not resolve to a modeled node).
+the target does not resolve to a modeled node). Since a Neo4j relationship
+always requires two endpoints, "no destination node" is written as a
+self-loop on the source `RouteTable` — the same Cypher-level trick used for
+`HAS_RULE` below. The `resolved`/`destination_cidr` properties, not the
+edge's endpoints, are the source of truth for whether a real destination
+exists.
 
 | Edge (cont.) | Properties (cont.) |
 |---|---|
@@ -225,6 +230,12 @@ criteria).
   `target_kind = "security_group_ref"`, `cidr` absent. If the reference is
   cross-account and cannot be dereferenced (local-audit mode), the edge is
   still written with `resolved = false` rather than failing ingestion.
+
+As with `ROUTES_TO` above, the CIDR form (and an unresolved SecurityGroup
+reference) has no real destination node, so it is written as a self-loop on
+the source `SecurityGroup` — a Neo4j relationship always needs two
+endpoints. `target_kind`/`cidr`/`resolved`, not the edge's endpoints, carry
+the actual target semantics.
 
 `ALLOWS_EGRESS` / `ALLOWS_INGRESS` properties:
 

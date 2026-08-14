@@ -3,3 +3,4 @@
 //! `crates/core/docs/schema.md` for the authoritative node/edge shapes.
 
 pub mod model;
+pub mod neo4j;
