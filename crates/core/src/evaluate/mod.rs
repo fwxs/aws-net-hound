@@ -12,29 +12,44 @@ use crate::error::EvaluationError;
 /// The AWS wire sentinel `-1` ("all protocols") is mapped to [`Protocol::All`]
 /// exactly once, in [`TryFrom<i32>`]'s implementation below — nowhere else in
 /// the codebase should test for `-1` directly.
+///
+/// `Icmp` carries its own `icmp_type`/`code` rather than reusing `Traffic`'s
+/// `port`: AWS overloads `from_port`/`to_port` as type/code for ICMP (see
+/// `build_port_range` in `crate::ingest::map`), and a single `u16` cannot
+/// hold both without ambiguity between "type" and "code". Keeping them on
+/// the `Icmp` variant itself means a `Traffic` can never be constructed with
+/// a `port` that means nothing for its protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "protocol", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Protocol {
     Tcp,
     Udp,
-    Icmp,
+    /// AWS overloads `from_port`/`to_port` as `icmp_type`/`code`; unlike
+    /// `TryFrom<i32>` (protocol number only), constructing this variant
+    /// requires that pair from the same source `crate::ingest::map` reads.
+    Icmp {
+        icmp_type: u8,
+        code: u8,
+    },
     /// AWS `-1`: matches every protocol.
     All,
 }
 
+/// The AWS IP protocol number for a [`Protocol`] that carries no per-protocol
+/// payload of its own (`Tcp`, `Udp`, `All`), per
+/// <https://www.iana.org/assignments/protocol-numbers/>. `-1` is AWS's own
+/// sentinel for "all protocols", not an IANA number. `Icmp` is excluded:
+/// it also needs `icmp_type`/`code`, which no bare protocol number carries,
+/// so it cannot be produced by this conversion — construct it directly.
 impl TryFrom<i32> for Protocol {
     type Error = EvaluationError;
 
-    /// Maps an AWS IP protocol number to a [`Protocol`], per
-    /// <https://www.iana.org/assignments/protocol-numbers/>. `-1` is AWS's
-    /// own sentinel for "all protocols", not an IANA number.
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
             -1 => Ok(Protocol::All),
             6 => Ok(Protocol::Tcp),
             17 => Ok(Protocol::Udp),
-            1 => Ok(Protocol::Icmp),
             other => Err(EvaluationError::UnsupportedProtocol { value: other }),
         }
     }
@@ -46,12 +61,13 @@ impl TryFrom<i32> for Protocol {
 /// layer function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Traffic {
-    /// Protocol of this traffic.
+    /// Protocol of this traffic, carrying any protocol-specific payload
+    /// (e.g. ICMP type/code).
     pub protocol: Protocol,
-    /// The concrete peer port this traffic uses. `Traffic` carries one
-    /// port, not a range — ranges exist only on rules
-    /// ([`crate::domain::PortRange`]).
-    pub port: u16,
+    /// The concrete peer port this traffic uses; `None` when the protocol
+    /// has no port concept (`Icmp`, `All`). `Traffic` carries one port, not
+    /// a range — ranges exist only on rules ([`crate::domain::PortRange`]).
+    pub port: Option<u16>,
     /// The peer address this traffic is to or from.
     pub peer_address: IpAddr,
 }
@@ -163,6 +179,24 @@ mod tests {
     }
 
     #[test]
+    fn protocol_try_from_icmp_number_returns_evaluation_error() {
+        // Arrange
+        let value: i32 = 1;
+
+        // Act
+        let result = Protocol::try_from(value);
+
+        // Assert
+        // ICMP needs `icmp_type`/`code`, which a bare protocol number
+        // cannot supply — construct `Protocol::Icmp { .. }` directly
+        // instead of going through this conversion.
+        assert!(matches!(
+            result,
+            Err(EvaluationError::UnsupportedProtocol { value: 1 })
+        ));
+    }
+
+    #[test]
     fn verdict_serializes_indeterminate_with_reason_preserved() {
         // Arrange
         let verdict = Verdict::Indeterminate {
@@ -190,12 +224,38 @@ mod tests {
         // Act
         let traffic = Traffic {
             protocol: Protocol::Tcp,
-            port: 443,
+            port: Some(443),
             peer_address,
         };
 
         // Assert
-        assert_eq!(traffic.port, 443);
+        assert_eq!(traffic.port, Some(443));
         assert_eq!(traffic.peer_address, peer_address);
+    }
+
+    #[test]
+    fn traffic_icmp_carries_type_and_code_not_port() {
+        // Arrange
+        let peer_address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+
+        // Act
+        let traffic = Traffic {
+            protocol: Protocol::Icmp {
+                icmp_type: 8,
+                code: 0,
+            },
+            port: None,
+            peer_address,
+        };
+
+        // Assert
+        assert!(matches!(
+            traffic.protocol,
+            Protocol::Icmp {
+                icmp_type: 8,
+                code: 0
+            }
+        ));
+        assert_eq!(traffic.port, None);
     }
 }
