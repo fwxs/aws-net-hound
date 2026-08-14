@@ -961,7 +961,6 @@ dependencies = [
  "neo4rs",
  "pretty_assertions",
  "serde",
- "serde_json",
  "serde_norway",
  "testcontainers",
  "thiserror 2.0.19",

@@ -6,7 +6,7 @@
 //! this crate's `ingest` module.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tracing::{info, warn};
 
@@ -19,14 +19,10 @@ use super::collect::{
     collect_network_acls, collect_network_interfaces, collect_route_tables,
     collect_security_groups, collect_vpc_peering_connections,
 };
-use super::map::topology::{
-    build_graph_batch, map_eni_node, map_network_acl_node, map_route_table_node,
-    map_security_group_node,
-};
+use super::map::topology::build_graph_batch;
 use super::IngestConfig;
 
-/// The kind of AWS resource an [`IngestWarning`] or an [`IngestReport`]
-/// count refers to.
+/// The kind of AWS resource an [`IngestReport`] count refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum ResourceKind {
     Eni,
@@ -36,32 +32,32 @@ pub enum ResourceKind {
     VpcPeeringConnection,
 }
 
-/// Why a single resource could not be mapped and was excluded from the
-/// ingested graph. `#[non_exhaustive]`: a future mapper may fail for a
-/// reason this variant set doesn't cover yet.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[non_exhaustive]
-pub enum IngestWarningReason {
-    /// A required field on the resource was missing or malformed. See
-    /// [`MappingError::InvalidField`].
-    InvalidField { field: &'static str, reason: String },
-}
-
 /// One resource that failed to map and was excluded from the run's graph
 /// batch. The run continues — see [`run_full_ingest`]'s doc comment for why
 /// this is non-fatal while a graph write failure is not.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct IngestWarning {
     pub resource_id: String,
-    pub resource_kind: ResourceKind,
-    pub reason: IngestWarningReason,
+    /// The field path within the SDK type that failed to map, e.g.
+    /// `"port_range"` — see [`MappingError::InvalidField`].
+    pub field: &'static str,
+    /// Human-readable reason the field could not be mapped.
+    pub reason: String,
 }
 
-fn duration_as_secs_f64<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_f64(duration.as_secs_f64())
+impl From<MappingError> for IngestWarning {
+    fn from(error: MappingError) -> Self {
+        let MappingError::InvalidField {
+            resource_id,
+            field,
+            reason,
+        } = error;
+        IngestWarning {
+            resource_id,
+            field,
+            reason,
+        }
+    }
 }
 
 /// The outcome of one [`run_full_ingest`] call.
@@ -70,7 +66,7 @@ where
 /// partially failed ingestion without a debugger: `counts` and
 /// `unresolved_references` make that legible from the report alone, not
 /// just from logs.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct IngestReport {
     /// Number of each resource kind actually written to the graph — after
     /// excluding anything recorded in `non_fatal`.
@@ -81,9 +77,8 @@ pub struct IngestReport {
     /// reference resolved; a large count on the same graph means something
     /// very different, and both are visible without a debugger.
     pub unresolved_references: usize,
-    /// Wall-clock time the run took, start to finish.
-    #[serde(serialize_with = "duration_as_secs_f64")]
-    pub duration: Duration,
+    /// Wall-clock time the run took, start to finish, in seconds.
+    pub duration_secs: f64,
     /// Resources that failed to map and were excluded, without aborting
     /// the run. See [`run_full_ingest`]'s doc comment.
     pub non_fatal: Vec<IngestWarning>,
@@ -123,14 +118,14 @@ pub async fn run_full_ingest<W: GraphWriter>(
 
 /// Does the actual collection, mapping, and write once the EC2 client and
 /// account id are already in hand. Split out from [`run_full_ingest`] so
-/// the `crates/core/tests/ingest_pipeline.rs` integration suite can drive
-/// the pipeline against an `aws-smithy-mocks` client and a fixed account id
-/// directly, instead of depending on `aws_config`'s provider chain or a
-/// real STS call — mirrors the
-/// [`super::aws_client::build_ec2_client`]/`build_ec2_client_from_sources`
-/// split. Not part of the crate's public API contract despite the `pub`
-/// visibility required for integration tests to reach it.
-#[doc(hidden)]
+/// `tests/ingest_pipeline.rs` and `tests/ingest_end_to_end.rs` can each
+/// drive the pipeline against an `aws-smithy-mocks` client and a fixed
+/// account id directly — the latter needs this seam too since it pairs
+/// mocked AWS responses with a real Neo4j, so the split can't be
+/// crate-private — instead of depending on `aws_config`'s provider chain or
+/// a real STS call. Mirrors the
+/// [`super::aws_client::build_ec2_client`]/`build_sdk_config_from_sources`
+/// split.
 pub async fn run_full_ingest_with_client<W: GraphWriter>(
     client: &aws_sdk_ec2::Client,
     account_id: &str,
@@ -156,44 +151,7 @@ pub async fn run_full_ingest_with_client<W: GraphWriter>(
         "collected raw AWS resources"
     );
 
-    let mut warnings = Vec::new();
-    let network_interfaces = filter_mappable(
-        account_id,
-        &network_interfaces,
-        map_eni_node,
-        ResourceKind::Eni,
-        &mut warnings,
-    );
-    let security_groups = filter_mappable(
-        account_id,
-        &security_groups,
-        map_security_group_node,
-        ResourceKind::SecurityGroup,
-        &mut warnings,
-    );
-    let network_acls = filter_mappable(
-        account_id,
-        &network_acls,
-        map_network_acl_node,
-        ResourceKind::NetworkAcl,
-        &mut warnings,
-    );
-    let route_tables = filter_mappable(
-        account_id,
-        &route_tables,
-        map_route_table_node,
-        ResourceKind::RouteTable,
-        &mut warnings,
-    );
-    for warning in &warnings {
-        warn!(
-            resource_id = %warning.resource_id,
-            resource_kind = ?warning.resource_kind,
-            reason = ?warning.reason,
-            "resource excluded from graph batch: failed to map"
-        );
-    }
-
+    let mut node_mapping_errors = Vec::new();
     let batch = build_graph_batch(
         account_id,
         &security_groups,
@@ -201,8 +159,19 @@ pub async fn run_full_ingest_with_client<W: GraphWriter>(
         &route_tables,
         &network_interfaces,
         &vpc_peering_connections,
+        &mut node_mapping_errors,
     )
     .map_err(|source| IngestError::Mapping { source })?;
+
+    let warnings: Vec<IngestWarning> = node_mapping_errors.into_iter().map(Into::into).collect();
+    for warning in &warnings {
+        warn!(
+            resource_id = %warning.resource_id,
+            field = warning.field,
+            reason = %warning.reason,
+            "resource excluded from graph batch: failed to map"
+        );
+    }
 
     let unresolved_references = count_unresolved(&batch);
 
@@ -220,61 +189,21 @@ pub async fn run_full_ingest_with_client<W: GraphWriter>(
         vpc_peering_connections.len(),
     );
 
-    let duration = start.elapsed();
+    let duration_secs = start.elapsed().as_secs_f64();
     info!(
         ?counts,
         unresolved_references,
         warnings = warnings.len(),
-        duration_secs = duration.as_secs_f64(),
+        duration_secs,
         "ingest complete"
     );
 
     Ok(IngestReport {
         counts,
         unresolved_references,
-        duration,
+        duration_secs,
         non_fatal: warnings,
     })
-}
-
-/// Filters `items` down to the ones `try_map_one` maps successfully,
-/// recording an [`IngestWarning`] (via `id_of`, applied to the item before
-/// mapping so a warning can still name the resource that failed) for every
-/// one that doesn't. Mapping is pure and cheap, so re-running it here
-/// (ahead of [`build_graph_batch`]'s own, identical mapping) costs nothing
-/// beyond a second pass over what are typically small collections, and lets
-/// one bad resource be excluded without aborting the whole batch — which
-/// `build_graph_batch` cannot do on its own, since it propagates the first
-/// `MappingError` via `?`.
-fn filter_mappable<T, R>(
-    account_id: &str,
-    items: &[T],
-    try_map_one: impl Fn(&T, &str) -> Result<R, MappingError>,
-    resource_kind: ResourceKind,
-    warnings: &mut Vec<IngestWarning>,
-) -> Vec<T>
-where
-    T: Clone,
-{
-    items
-        .iter()
-        .filter(|item| match try_map_one(item, account_id) {
-            Ok(_) => true,
-            Err(MappingError::InvalidField {
-                resource_id,
-                field,
-                reason,
-            }) => {
-                warnings.push(IngestWarning {
-                    resource_id,
-                    resource_kind,
-                    reason: IngestWarningReason::InvalidField { field, reason },
-                });
-                false
-            }
-        })
-        .cloned()
-        .collect()
 }
 
 fn count_unresolved(batch: &GraphBatch) -> usize {
@@ -284,11 +213,34 @@ fn count_unresolved(batch: &GraphBatch) -> usize {
         .filter(|edge| match edge {
             Edge::RoutesTo(edge) => !edge.resolved,
             Edge::AllowsIngress { rule, .. } | Edge::AllowsEgress { rule, .. } => !rule.resolved,
-            _ => false,
+            Edge::HasSg(_)
+            | Edge::InSubnet(_)
+            | Edge::ProtectedBy(_)
+            | Edge::UsesRouteTable(_)
+            | Edge::HasRule { .. } => false,
         })
         .count()
 }
 
+/// Groups `(key, value)` pairs by key, preserving each key's values in
+/// encounter order. Shared by [`write_batch`]'s three rule-batch groupings
+/// (ingress, egress, NACL) so a future fourth kind, or a fix to the
+/// grouping logic itself, only needs editing in one place.
+fn group_by<'a, V: Clone + 'a>(
+    pairs: impl Iterator<Item = (&'a str, &'a V)>,
+) -> BTreeMap<&'a str, Vec<V>> {
+    let mut grouped: BTreeMap<&str, Vec<V>> = BTreeMap::new();
+    for (key, value) in pairs {
+        grouped.entry(key).or_default().push(value.clone());
+    }
+    grouped
+}
+
+/// Writes every node and edge in `batch` via `writer`. `edge.clone()`/
+/// `rule.clone()` throughout: `GraphWriter`'s upsert methods need owned,
+/// regrouped-by-key `Vec`s (e.g. one `SgRuleBatch` per security group), but
+/// `batch.edges` is a single flat `Vec` behind `&GraphBatch` — producing
+/// per-key groupings from borrowed data requires cloning into fresh `Vec`s.
 async fn write_batch<W: GraphWriter>(
     writer: &W,
     batch: &GraphBatch,
@@ -307,9 +259,9 @@ async fn write_batch<W: GraphWriter>(
     let mut protected_by_edges = Vec::new();
     let mut uses_route_table_edges = Vec::new();
     let mut routes_to_edges = Vec::new();
-    let mut ingress_by_sg: BTreeMap<&str, Vec<_>> = BTreeMap::new();
-    let mut egress_by_sg: BTreeMap<&str, Vec<_>> = BTreeMap::new();
-    let mut rules_by_nacl: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+    let mut ingress_pairs = Vec::new();
+    let mut egress_pairs = Vec::new();
+    let mut nacl_pairs = Vec::new();
 
     for edge in &batch.edges {
         match edge {
@@ -321,24 +273,15 @@ async fn write_batch<W: GraphWriter>(
             Edge::AllowsIngress {
                 security_group_id,
                 rule,
-            } => ingress_by_sg
-                .entry(security_group_id.as_str())
-                .or_default()
-                .push(rule.clone()),
+            } => ingress_pairs.push((security_group_id.as_str(), rule)),
             Edge::AllowsEgress {
                 security_group_id,
                 rule,
-            } => egress_by_sg
-                .entry(security_group_id.as_str())
-                .or_default()
-                .push(rule.clone()),
+            } => egress_pairs.push((security_group_id.as_str(), rule)),
             Edge::HasRule {
                 network_acl_id,
                 rule,
-            } => rules_by_nacl
-                .entry(network_acl_id.as_str())
-                .or_default()
-                .push(rule.clone()),
+            } => nacl_pairs.push((network_acl_id.as_str(), rule)),
         }
     }
 
@@ -352,6 +295,7 @@ async fn write_batch<W: GraphWriter>(
         .await?;
     writer.upsert_routes_to_edges(&routes_to_edges).await?;
 
+    let ingress_by_sg = group_by(ingress_pairs.into_iter());
     let ingress_batches: Vec<SgRuleBatch<'_>> = ingress_by_sg
         .iter()
         .map(|(security_group_id, rules)| SgRuleBatch {
@@ -361,6 +305,7 @@ async fn write_batch<W: GraphWriter>(
         .collect();
     writer.upsert_allows_ingress_rules(&ingress_batches).await?;
 
+    let egress_by_sg = group_by(egress_pairs.into_iter());
     let egress_batches: Vec<SgRuleBatch<'_>> = egress_by_sg
         .iter()
         .map(|(security_group_id, rules)| SgRuleBatch {
@@ -370,6 +315,7 @@ async fn write_batch<W: GraphWriter>(
         .collect();
     writer.upsert_allows_egress_rules(&egress_batches).await?;
 
+    let rules_by_nacl = group_by(nacl_pairs.into_iter());
     let nacl_batches: Vec<NaclRuleBatch<'_>> = rules_by_nacl
         .iter()
         .map(|(network_acl_id, rules)| NaclRuleBatch {

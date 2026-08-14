@@ -125,11 +125,7 @@ pub(crate) async fn resolve_account_id(sdk_config: &SdkConfig) -> Result<String,
             source: Box::new(source),
         })?;
 
-    identity.account.ok_or(IngestError::AccountIdResolution {
-        source: Box::new(std::io::Error::other(
-            "GetCallerIdentity response had no account field",
-        )),
-    })
+    identity.account.ok_or(IngestError::AccountIdMissing)
 }
 
 /// Picks the first non-empty candidate, in priority order: `explicit`,
@@ -161,7 +157,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn build_ec2_client_with_explicit_region_uses_that_region() {
+    async fn build_sdk_config_with_explicit_region_uses_that_region() {
         // Arrange / Act
         let result = build_sdk_config_from_sources(Some("eu-west-1"), None, None, None).await;
 
@@ -174,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_ec2_client_without_any_region_returns_region_not_resolved() {
+    async fn build_sdk_config_without_any_region_returns_region_not_resolved() {
         // Arrange / Act
         let result = build_sdk_config_from_sources(None, None, None, None).await;
 

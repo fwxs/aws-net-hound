@@ -9,10 +9,6 @@ pub mod collect;
 pub mod map;
 pub mod pipeline;
 
-pub use pipeline::{
-    run_full_ingest, IngestReport, IngestWarning, IngestWarningReason, ResourceKind,
-};
-
 /// Configuration shared by ingestion: AWS client construction now, and the
 /// Neo4j connection settings [`crate::migrations`]'s caller and M1-T6's
 /// `GraphWriter` implementation will need.

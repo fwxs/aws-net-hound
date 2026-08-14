@@ -10,10 +10,11 @@
 // loudly if the fixture itself is broken — not what this test asserts on.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use aws_net_hound_core::graph::neo4j::Neo4jGraphWriter;
 use aws_net_hound_core::ingest::pipeline::run_full_ingest_with_client;
 use aws_net_hound_core::migrations;
-use aws_sdk_ec2::config::retry::RetryConfig;
 use aws_sdk_ec2::operation::describe_network_acls::DescribeNetworkAclsOutput;
 use aws_sdk_ec2::operation::describe_network_interfaces::DescribeNetworkInterfacesOutput;
 use aws_sdk_ec2::operation::describe_route_tables::DescribeRouteTablesOutput;
@@ -21,10 +22,10 @@ use aws_sdk_ec2::operation::describe_security_groups::DescribeSecurityGroupsOutp
 use aws_sdk_ec2::operation::describe_vpc_peering_connections::DescribeVpcPeeringConnectionsOutput;
 use aws_sdk_ec2::types::{GroupIdentifier, NetworkInterface, SecurityGroup};
 use aws_sdk_ec2::Client;
-use aws_smithy_mocks::{mock, mock_client, Rule, RuleMode};
+use aws_smithy_mocks::{mock, Rule};
+use common::mock_ec2_client;
 use neo4rs::{ConfigBuilder, Graph};
 use pretty_assertions::assert_eq;
-use std::time::Duration;
 use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
 
 const NEO4J_IMAGE: &str = "neo4j";
@@ -67,18 +68,6 @@ async fn start_neo4j() -> (ContainerAsync<GenericImage>, Graph) {
 
     let graph = Graph::connect(config).await.expect("graph connects");
     (container, graph)
-}
-
-fn fast_retry_config() -> RetryConfig {
-    RetryConfig::standard()
-        .with_max_attempts(3)
-        .with_initial_backoff(Duration::from_millis(1))
-        .with_max_backoff(Duration::from_millis(5))
-}
-
-fn mock_ec2_client(rules: &[&Rule]) -> Client {
-    mock_client!(aws_sdk_ec2, RuleMode::MatchAny, rules, |conf| conf
-        .retry_config(fast_retry_config()))
 }
 
 #[tokio::test]

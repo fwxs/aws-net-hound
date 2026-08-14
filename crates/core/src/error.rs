@@ -175,16 +175,24 @@ pub enum IngestError {
         source: MappingError,
     },
 
-    /// Resolving the calling account's id via STS `GetCallerIdentity`
-    /// failed. Fatal: every node this milestone writes is stamped with
-    /// `account_id`, so a graph built without a trustworthy one cannot be
-    /// used for a boundary audit — see
+    /// The STS `GetCallerIdentity` call itself failed (network, auth,
+    /// throttling). Fatal: every node this milestone writes is stamped
+    /// with `account_id`, so a graph built without a trustworthy one
+    /// cannot be used for a boundary audit — see
     /// [`crate::ingest::aws_client::resolve_account_id`].
     #[error("failed to resolve the calling AWS account id: {source}")]
     AccountIdResolution {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// STS `GetCallerIdentity` responded successfully but the response
+    /// carried no `account` field. Distinct from
+    /// [`IngestError::AccountIdResolution`]: this is a malformed/unexpected
+    /// API response, not a transport or auth failure — a caller inspecting
+    /// the error needs to tell the two apart.
+    #[error("STS GetCallerIdentity response had no account field")]
+    AccountIdMissing,
 
     /// Writing a mapped batch to the graph failed. Fatal: a partial write
     /// is indistinguishable from a clean, empty account, which is the exact
