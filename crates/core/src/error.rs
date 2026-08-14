@@ -65,6 +65,12 @@ pub enum EvaluationError {
     /// A hop within the path candidate was structurally invalid.
     #[error("path candidate has an invalid hop at index {index}: {reason}")]
     InvalidHop { index: usize, reason: String },
+
+    /// An `i32` protocol number that does not map to a known
+    /// [`crate::evaluate::Protocol`] variant or the `-1` all-protocols
+    /// sentinel.
+    #[error("unsupported protocol number: {value}")]
+    UnsupportedProtocol { value: i32 },
 }
 
 /// Errors that can occur while ordering, applying, or recording schema
