@@ -119,7 +119,10 @@ pub fn build_graph_batch(
     })
 }
 
-fn map_eni_node(eni: &NetworkInterface, account_id: &str) -> Result<EniRecord, MappingError> {
+pub(crate) fn map_eni_node(
+    eni: &NetworkInterface,
+    account_id: &str,
+) -> Result<EniRecord, MappingError> {
     let id = require_str(
         "<unknown ENI>",
         "network_interface_id",
@@ -140,7 +143,7 @@ fn map_eni_node(eni: &NetworkInterface, account_id: &str) -> Result<EniRecord, M
     })
 }
 
-fn map_security_group_node(
+pub(crate) fn map_security_group_node(
     sg: &SecurityGroup,
     account_id: &str,
 ) -> Result<SecurityGroupRecord, MappingError> {
@@ -157,7 +160,7 @@ fn map_security_group_node(
     })
 }
 
-fn map_network_acl_node(
+pub(crate) fn map_network_acl_node(
     acl: &NetworkAcl,
     account_id: &str,
 ) -> Result<NetworkAclRecord, MappingError> {
@@ -182,7 +185,7 @@ fn map_network_acl_node(
     })
 }
 
-fn map_route_table_node(
+pub(crate) fn map_route_table_node(
     route_table: &RouteTable,
     account_id: &str,
 ) -> Result<RouteTableRecord, MappingError> {

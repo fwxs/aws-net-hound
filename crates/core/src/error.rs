@@ -174,6 +174,27 @@ pub enum IngestError {
         #[source]
         source: MappingError,
     },
+
+    /// Resolving the calling account's id via STS `GetCallerIdentity`
+    /// failed. Fatal: every node this milestone writes is stamped with
+    /// `account_id`, so a graph built without a trustworthy one cannot be
+    /// used for a boundary audit — see
+    /// [`crate::ingest::aws_client::resolve_account_id`].
+    #[error("failed to resolve the calling AWS account id: {source}")]
+    AccountIdResolution {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Writing a mapped batch to the graph failed. Fatal: a partial write
+    /// is indistinguishable from a clean, empty account, which is the exact
+    /// failure mode this tool exists to prevent — see
+    /// [`crate::ingest::pipeline::run_full_ingest`].
+    #[error("failed to write to the graph: {source}")]
+    Write {
+        #[source]
+        source: GraphWriteError,
+    },
 }
 
 /// Errors raised while mapping `aws_sdk_ec2::types::*` values into
