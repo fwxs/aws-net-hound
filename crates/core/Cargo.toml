@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 aws-config = { workspace = true }
 aws-sdk-ec2 = { workspace = true }
+aws-sdk-sts = { workspace = true }
 aws-smithy-async = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 neo4rs = { workspace = true }

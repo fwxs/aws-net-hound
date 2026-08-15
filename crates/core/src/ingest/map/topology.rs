@@ -35,13 +35,25 @@ use super::sg::map_security_group_rules;
 /// `account_id` is stamped on every node record and passed through to
 /// [`map_security_group_rules`] for its own cross-account resolution.
 ///
+/// A resource whose *node* fields fail to map (a required field missing or
+/// malformed) is skipped and its [`MappingError`] pushed onto
+/// `node_mapping_errors`, rather than aborting the whole batch — one
+/// unmappable ENI must not discard every other resource. Edge/rule mapping
+/// (security group and NACL rules) has no such per-item recovery and still
+/// aborts the whole call via `?`, since a malformed rule on an otherwise
+/// well-formed resource has no well-defined partial result to fall back to.
+///
 /// # Example
 ///
 /// ```
 /// use aws_net_hound_core::ingest::map::topology::build_graph_batch;
 ///
-/// let batch = build_graph_batch("123456789012", &[], &[], &[], &[], &[]).unwrap();
+/// let mut node_mapping_errors = Vec::new();
+/// let batch = build_graph_batch(
+///     "123456789012", &[], &[], &[], &[], &[], &mut node_mapping_errors,
+/// ).unwrap();
 /// assert!(batch.edges.is_empty());
+/// assert!(node_mapping_errors.is_empty());
 /// ```
 pub fn build_graph_batch(
     account_id: &str,
@@ -50,63 +62,75 @@ pub fn build_graph_batch(
     route_tables: &[RouteTable],
     network_interfaces: &[NetworkInterface],
     vpc_peering_connections: &[VpcPeeringConnection],
+    node_mapping_errors: &mut Vec<MappingError>,
 ) -> Result<GraphBatch, MappingError> {
-    let enis = network_interfaces
-        .iter()
-        .map(|eni| map_eni_node(eni, account_id))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let security_group_records = security_groups
-        .iter()
-        .map(|sg| map_security_group_node(sg, account_id))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let network_acl_records = network_acls
-        .iter()
-        .map(|acl| map_network_acl_node(acl, account_id))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let route_table_records = route_tables
-        .iter()
-        .map(|route_table| map_route_table_node(route_table, account_id))
-        .collect::<Result<Vec<_>, _>>()?;
+    let (network_interfaces, enis): (Vec<_>, Vec<_>) = map_nodes(
+        network_interfaces,
+        map_eni_node,
+        account_id,
+        node_mapping_errors,
+    );
+    let (security_groups, security_group_records): (Vec<_>, Vec<_>) = map_nodes(
+        security_groups,
+        map_security_group_node,
+        account_id,
+        node_mapping_errors,
+    );
+    let (network_acls, network_acl_records): (Vec<_>, Vec<_>) = map_nodes(
+        network_acls,
+        map_network_acl_node,
+        account_id,
+        node_mapping_errors,
+    );
+    let (route_tables, route_table_records): (Vec<_>, Vec<_>) = map_nodes(
+        route_tables,
+        map_route_table_node,
+        account_id,
+        node_mapping_errors,
+    );
 
     let vpcs = collect_vpc_stubs(
         account_id,
-        security_groups,
-        network_acls,
-        route_tables,
-        network_interfaces,
+        &security_groups,
+        &network_acls,
+        &route_tables,
+        &network_interfaces,
         vpc_peering_connections,
     )
     .into_values()
     .collect();
 
-    let subnets = collect_subnet_stubs(account_id, network_interfaces, network_acls, route_tables)
-        .into_values()
-        .collect();
+    let subnets = collect_subnet_stubs(
+        account_id,
+        &network_interfaces,
+        &network_acls,
+        &route_tables,
+    )
+    .into_values()
+    .collect();
 
     // Every `*_edges` helper below is handed the node records built above
     // instead of re-deriving/re-validating each id from the raw SDK type:
     // `map_eni_node`/etc. already validated it once, and `zip`ping is sound
-    // because each `Vec` of records was built via a straight, unfiltered
-    // `.map()` over its corresponding raw slice — same length, same order.
-    let mut edges = has_sg_edges(network_interfaces, &enis)?;
+    // because each `Vec` of records was built by `map_nodes` from exactly
+    // the corresponding raw items that survived mapping — same length,
+    // same order, on both sides of the pair.
+    let mut edges = has_sg_edges(&network_interfaces, &enis)?;
     edges.extend(in_subnet_edges(&enis));
-    edges.extend(protected_by_edges(network_acls, &network_acl_records));
-    edges.extend(uses_route_table_edges(route_tables, &route_table_records));
+    edges.extend(protected_by_edges(&network_acls, &network_acl_records));
+    edges.extend(uses_route_table_edges(&route_tables, &route_table_records));
     edges.extend(routes_to_edges(
         account_id,
-        route_tables,
+        &route_tables,
         &route_table_records,
         vpc_peering_connections,
     ));
     edges.extend(allows_edges(
-        security_groups,
+        &security_groups,
         &security_group_records,
         account_id,
     )?);
-    edges.extend(has_rule_edges(network_acls, &network_acl_records)?);
+    edges.extend(has_rule_edges(&network_acls, &network_acl_records)?);
 
     Ok(GraphBatch {
         enis,
@@ -117,6 +141,30 @@ pub fn build_graph_batch(
         route_tables: route_table_records,
         edges,
     })
+}
+
+/// Maps each item in `raw` through `map_one`, keeping the `(raw, record)`
+/// pair for every item that maps successfully and pushing the
+/// [`MappingError`] for every one that doesn't onto `errors` instead of
+/// aborting. Returning the surviving raw items alongside their records
+/// (rather than just the records) keeps every `*_edges` helper's
+/// `zip`-against-the-raw-slice invariant sound: both sides only ever
+/// contain the same, already-mapped subset.
+fn map_nodes<'a, T, R>(
+    raw: &'a [T],
+    map_one: impl Fn(&T, &str) -> Result<R, MappingError>,
+    account_id: &str,
+    errors: &mut Vec<MappingError>,
+) -> (Vec<&'a T>, Vec<R>) {
+    raw.iter()
+        .filter_map(|item| match map_one(item, account_id) {
+            Ok(record) => Some((item, record)),
+            Err(error) => {
+                errors.push(error);
+                None
+            }
+        })
+        .unzip()
 }
 
 fn map_eni_node(eni: &NetworkInterface, account_id: &str) -> Result<EniRecord, MappingError> {
@@ -140,7 +188,7 @@ fn map_eni_node(eni: &NetworkInterface, account_id: &str) -> Result<EniRecord, M
     })
 }
 
-fn map_security_group_node(
+pub(crate) fn map_security_group_node(
     sg: &SecurityGroup,
     account_id: &str,
 ) -> Result<SecurityGroupRecord, MappingError> {
@@ -157,7 +205,7 @@ fn map_security_group_node(
     })
 }
 
-fn map_network_acl_node(
+pub(crate) fn map_network_acl_node(
     acl: &NetworkAcl,
     account_id: &str,
 ) -> Result<NetworkAclRecord, MappingError> {
@@ -182,7 +230,7 @@ fn map_network_acl_node(
     })
 }
 
-fn map_route_table_node(
+pub(crate) fn map_route_table_node(
     route_table: &RouteTable,
     account_id: &str,
 ) -> Result<RouteTableRecord, MappingError> {
@@ -210,7 +258,7 @@ fn map_route_table_node(
 /// `network_interfaces` mapped 1:1 through [`map_eni_node`] — zipping reuses
 /// each ENI's already-validated id instead of re-validating it here.
 fn has_sg_edges(
-    network_interfaces: &[NetworkInterface],
+    network_interfaces: &[&NetworkInterface],
     enis: &[EniRecord],
 ) -> Result<Vec<Edge>, MappingError> {
     network_interfaces
@@ -251,7 +299,7 @@ fn in_subnet_edges(enis: &[EniRecord]) -> Vec<Edge> {
 /// `network_acl_records` is `network_acls` mapped 1:1 through
 /// [`map_network_acl_node`] — zipping reuses each ACL's already-validated id.
 fn protected_by_edges(
-    network_acls: &[NetworkAcl],
+    network_acls: &[&NetworkAcl],
     network_acl_records: &[NetworkAclRecord],
 ) -> Vec<Edge> {
     network_acls
@@ -279,7 +327,7 @@ fn protected_by_edges(
 /// is `route_tables` mapped 1:1 through [`map_route_table_node`] — zipping
 /// reuses each route table's already-validated id.
 fn uses_route_table_edges(
-    route_tables: &[RouteTable],
+    route_tables: &[&RouteTable],
     route_table_records: &[RouteTableRecord],
 ) -> Vec<Edge> {
     route_tables
@@ -310,7 +358,7 @@ fn uses_route_table_edges(
 /// already-validated id and `vpc_id`.
 fn routes_to_edges(
     account_id: &str,
-    route_tables: &[RouteTable],
+    route_tables: &[&RouteTable],
     route_table_records: &[RouteTableRecord],
     peerings: &[VpcPeeringConnection],
 ) -> Vec<Edge> {
@@ -385,7 +433,7 @@ fn resolve_route_target(
 /// `security_groups` mapped 1:1 through [`map_security_group_node`] —
 /// zipping reuses each SG's already-validated id.
 fn allows_edges(
-    security_groups: &[SecurityGroup],
+    security_groups: &[&SecurityGroup],
     security_group_records: &[SecurityGroupRecord],
     account_id: &str,
 ) -> Result<Vec<Edge>, MappingError> {
@@ -417,7 +465,7 @@ fn allows_edges(
 /// `network_acl_records` is `network_acls` mapped 1:1 through
 /// [`map_network_acl_node`] — zipping reuses each ACL's already-validated id.
 fn has_rule_edges(
-    network_acls: &[NetworkAcl],
+    network_acls: &[&NetworkAcl],
     network_acl_records: &[NetworkAclRecord],
 ) -> Result<Vec<Edge>, MappingError> {
     network_acls
@@ -456,10 +504,10 @@ fn insert_vpc_stub(vpcs: &mut BTreeMap<String, VpcRecord>, account_id: &str, vpc
 /// incomplete.
 fn collect_vpc_stubs(
     account_id: &str,
-    security_groups: &[SecurityGroup],
-    network_acls: &[NetworkAcl],
-    route_tables: &[RouteTable],
-    network_interfaces: &[NetworkInterface],
+    security_groups: &[&SecurityGroup],
+    network_acls: &[&NetworkAcl],
+    route_tables: &[&RouteTable],
+    network_interfaces: &[&NetworkInterface],
     peerings: &[VpcPeeringConnection],
 ) -> BTreeMap<String, VpcRecord> {
     let mut vpcs = BTreeMap::new();
@@ -517,9 +565,9 @@ fn insert_subnet_stub(
 /// `Subnet` section.
 fn collect_subnet_stubs(
     account_id: &str,
-    network_interfaces: &[NetworkInterface],
-    network_acls: &[NetworkAcl],
-    route_tables: &[RouteTable],
+    network_interfaces: &[&NetworkInterface],
+    network_acls: &[&NetworkAcl],
+    route_tables: &[&RouteTable],
 ) -> BTreeMap<String, SubnetRecord> {
     let mut subnets = BTreeMap::new();
 
@@ -584,7 +632,7 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[], &[eni], &[])
+        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[], &[eni], &[], &mut Vec::new())
             .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
@@ -605,7 +653,7 @@ mod tests {
         let eni = eni_builder().build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[], &[eni], &[])
+        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[], &[eni], &[], &mut Vec::new())
             .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
@@ -631,7 +679,7 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[acl], &[], &[], &[])
+        let batch = build_graph_batch(ACCOUNT_ID, &[], &[acl], &[], &[], &[], &mut Vec::new())
             .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
@@ -656,8 +704,16 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[route_table], &[], &[])
-            .unwrap_or_else(|error| panic!("expected Ok: {error}"));
+        let batch = build_graph_batch(
+            ACCOUNT_ID,
+            &[],
+            &[],
+            &[route_table],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
         assert!(batch
@@ -678,8 +734,16 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[route_table], &[], &[])
-            .unwrap_or_else(|error| panic!("expected Ok: {error}"));
+        let batch = build_graph_batch(
+            ACCOUNT_ID,
+            &[],
+            &[],
+            &[route_table],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
         assert_eq!(batch.route_tables.len(), 1);
@@ -719,8 +783,16 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[route_table], &[], &[peering])
-            .unwrap_or_else(|error| panic!("expected Ok: {error}"));
+        let batch = build_graph_batch(
+            ACCOUNT_ID,
+            &[],
+            &[],
+            &[route_table],
+            &[],
+            &[peering],
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
         let routes_to = batch
@@ -750,7 +822,7 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[sg], &[acl], &[], &[], &[])
+        let batch = build_graph_batch(ACCOUNT_ID, &[sg], &[acl], &[], &[], &[], &mut Vec::new())
             .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
@@ -778,7 +850,7 @@ mod tests {
             .build();
 
         // Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[acl], &[], &[], &[])
+        let batch = build_graph_batch(ACCOUNT_ID, &[], &[acl], &[], &[], &[], &mut Vec::new())
             .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
@@ -797,7 +869,7 @@ mod tests {
     #[test]
     fn build_graph_batch_empty_inputs_returns_empty_batch() {
         // Arrange / Act
-        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[], &[], &[])
+        let batch = build_graph_batch(ACCOUNT_ID, &[], &[], &[], &[], &[], &mut Vec::new())
             .unwrap_or_else(|error| panic!("expected Ok: {error}"));
 
         // Assert
