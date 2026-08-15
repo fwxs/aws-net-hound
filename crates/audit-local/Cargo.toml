@@ -6,5 +6,20 @@ edition = "2021"
 [lints]
 workspace = true
 
+[lib]
+name = "audit_local"
+path = "src/lib.rs"
+
+[[bin]]
+name = "audit-local"
+path = "src/main.rs"
+
 [dependencies]
 aws_net_hound_core = { path = "../core", package = "core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
