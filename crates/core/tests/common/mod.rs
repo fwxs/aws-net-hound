@@ -5,6 +5,10 @@
 // Locking a freshly-constructed `Mutex` and unwrapping trivial constructors
 // in test arrange steps is not the thing under test.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// This module is compiled separately per integration-test binary via
+// `mod common;`; each binary only uses a subset of these helpers, so
+// unused-per-binary items would otherwise trip `-D dead-code`.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;
