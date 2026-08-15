@@ -22,3 +22,6 @@ loot
 
 .claude/
 graphify-out/
+
+# Local Neo4j credentials, never commit
+crates/audit-local/.env
