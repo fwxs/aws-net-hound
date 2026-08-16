@@ -21,6 +21,9 @@ tracing = "0.1.44"
 aws-smithy-mocks = "0.3.0"
 pretty_assertions = "1.4.1"
 testcontainers = "0.28.0"
+clap = { version = "4.6.6", features = ["derive"] }
+anyhow = "1.0.104"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
