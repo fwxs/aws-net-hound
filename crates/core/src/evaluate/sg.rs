@@ -188,19 +188,13 @@ fn classify_rule(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
-
     use pretty_assertions::assert_eq;
 
     use crate::domain::rule::PortRange;
+    use crate::evaluate::test_support::{port_range, tcp_traffic, v4};
     use crate::evaluate::Protocol;
 
     use super::*;
-
-    fn port_range(from_port: u16, to_port: u16) -> PortRange {
-        PortRange::new(from_port, to_port)
-            .unwrap_or_else(|error| panic!("expected a valid port range: {error}"))
-    }
 
     fn cidr_rule(
         direction: Direction,
@@ -235,18 +229,6 @@ mod tests {
             },
             resolved,
         }
-    }
-
-    fn tcp_traffic(port: u16, peer_address: IpAddr) -> Traffic {
-        Traffic {
-            protocol: Protocol::Tcp,
-            port: Some(port),
-            peer_address,
-        }
-    }
-
-    fn v4(octets: [u8; 4]) -> IpAddr {
-        IpAddr::V4(Ipv4Addr::from(octets))
     }
 
     #[test]

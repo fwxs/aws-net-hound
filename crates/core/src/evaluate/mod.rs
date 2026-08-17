@@ -229,6 +229,34 @@ pub(super) fn cidr_contains(cidr: &str, address: IpAddr) -> Option<bool> {
     }
 }
 
+/// Test-only builders shared by [`sg`]'s and [`nacl`]'s test modules, so a
+/// change to [`Traffic`]/[`PortRange`] or the panic message on an invalid
+/// port range only needs editing once, with the compiler catching every
+/// caller that needs updating.
+#[cfg(test)]
+pub(super) mod test_support {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::{PortRange, Protocol, Traffic};
+
+    pub(crate) fn port_range(from_port: u16, to_port: u16) -> PortRange {
+        PortRange::new(from_port, to_port)
+            .unwrap_or_else(|error| panic!("expected a valid port range: {error}"))
+    }
+
+    pub(crate) fn tcp_traffic(port: u16, peer_address: IpAddr) -> Traffic {
+        Traffic {
+            protocol: Protocol::Tcp,
+            port: Some(port),
+            peer_address,
+        }
+    }
+
+    pub(crate) fn v4(octets: [u8; 4]) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(octets))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
