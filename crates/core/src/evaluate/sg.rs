@@ -17,10 +17,11 @@
 //! and the functions here are mandated to be pure (`-> Verdict`, not
 //! `-> Result<Verdict, _>`).
 
-use std::net::IpAddr;
-
-use crate::domain::rule::{Direction, PortRange, RuleTarget, SgRule};
-use crate::evaluate::{DenyReason, IndeterminateReason, Protocol, RuleRef, Traffic, Verdict};
+use crate::domain::rule::{Direction, RuleTarget, SgRule};
+use crate::evaluate::{
+    cidr_contains, port_matches, rule_protocol_matches, DenyReason, IndeterminateReason, RuleRef,
+    Traffic, Verdict,
+};
 
 /// The set of security groups the peer ENI belongs to, for matching
 /// [`RuleTarget::SecurityGroupRef`] rules. The peer's IP address is not
@@ -185,92 +186,14 @@ fn classify_rule(
     }
 }
 
-/// Whether a rule's raw AWS protocol string matches concrete traffic.
-///
-/// `rule_protocol` is [`SgRule::protocol`] — AWS's `IpPermission.IpProtocol`
-/// verbatim (`"tcp"`, `"udp"`, `"icmp"`, `"icmpv6"`, or `"-1"` for all
-/// protocols; see `crate::ingest::map::sg::map_permission`). Not a full
-/// parse into [`Protocol`]: a rule's protocol string alone never carries
-/// the `icmp_type`/`code` payload `Protocol::Icmp` requires, so this
-/// compares string identity against `traffic_protocol`'s discriminant
-/// instead of constructing a `Protocol` to compare with `==`.
-fn rule_protocol_matches(rule_protocol: &str, traffic_protocol: Protocol) -> bool {
-    match rule_protocol {
-        "-1" => true,
-        "tcp" => matches!(traffic_protocol, Protocol::Tcp),
-        "udp" => matches!(traffic_protocol, Protocol::Udp),
-        "icmp" | "icmpv6" => matches!(traffic_protocol, Protocol::Icmp { .. }),
-        _ => false,
-    }
-}
-
-/// Whether `traffic_port` (if any) falls within `rule_port_range`
-/// (inclusive), for protocols where ports apply.
-///
-/// Only called when the rule's protocol is not the `-1` all-protocols
-/// sentinel (see [`classify_rule`]) — `-1` rules skip this entirely
-/// regardless of what `port_range` they carry.
-///
-/// `rule_port_range: None` (a tcp/udp rule with no port restriction) is
-/// treated as "matches every port" — real AWS API usage always sets
-/// `from_port`/`to_port` for tcp/udp, but the type does not enforce that,
-/// and refusing to match here would silently and incorrectly deny traffic
-/// for a validly-constructed [`SgRule`] the type system permits.
-/// `traffic_port: None` against `Some(rule_port_range)` is treated as a
-/// mismatch — a `None` traffic port carries no port to check inclusion
-/// for, so an explicit range cannot be satisfied.
-fn port_matches(rule_port_range: Option<PortRange>, traffic_port: Option<u16>) -> bool {
-    match (rule_port_range, traffic_port) {
-        (None, _) => true,
-        (Some(range), Some(port)) => (range.from_port()..=range.to_port()).contains(&port),
-        (Some(_), None) => false,
-    }
-}
-
-/// Whether `cidr` (`"ip/prefix_len"`, IPv4 or IPv6) contains `address`.
-///
-/// Returns `None` if `cidr` fails to parse as a valid CIDR — see the
-/// module-level doc comment on why this is treated as an inert non-match by
-/// callers rather than a panic or a propagated error.
-fn cidr_contains(cidr: &str, address: IpAddr) -> Option<bool> {
-    let (network_str, prefix_str) = cidr.split_once('/')?;
-    let network: IpAddr = network_str.parse().ok()?;
-    let prefix_len: u32 = prefix_str.parse().ok()?;
-
-    match (network, address) {
-        (IpAddr::V4(network), IpAddr::V4(address)) => {
-            if prefix_len > 32 {
-                return None;
-            }
-            let mask = if prefix_len == 0 {
-                0
-            } else {
-                u32::MAX << (32 - prefix_len)
-            };
-            Some(u32::from(network) & mask == u32::from(address) & mask)
-        }
-        (IpAddr::V6(network), IpAddr::V6(address)) => {
-            if prefix_len > 128 {
-                return None;
-            }
-            let mask = if prefix_len == 0 {
-                0
-            } else {
-                u128::MAX << (128 - prefix_len)
-            };
-            Some(u128::from(network) & mask == u128::from(address) & mask)
-        }
-        // Mixed families (v4 CIDR vs. v6 peer or vice versa) can never
-        // contain each other.
-        _ => Some(false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use pretty_assertions::assert_eq;
+
+    use crate::domain::rule::PortRange;
+    use crate::evaluate::Protocol;
 
     use super::*;
 

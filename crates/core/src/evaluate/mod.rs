@@ -5,8 +5,10 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::rule::PortRange;
 use crate::error::EvaluationError;
 
+pub mod nacl;
 pub mod sg;
 
 /// Protocol a [`Traffic`] value carries.
@@ -145,6 +147,88 @@ pub enum Verdict {
     Indeterminate { reason: IndeterminateReason },
 }
 
+/// Whether a rule's raw AWS protocol string matches concrete traffic.
+///
+/// `rule_protocol` is the rule's raw `protocol` field — AWS's
+/// `IpPermission.IpProtocol`/NACL rule protocol verbatim (`"tcp"`, `"udp"`,
+/// `"icmp"`, `"icmpv6"`, or `"-1"` for all protocols). Not a full parse into
+/// [`Protocol`]: a rule's protocol string alone never carries the
+/// `icmp_type`/`code` payload `Protocol::Icmp` requires, so this compares
+/// string identity against `traffic_protocol`'s discriminant instead of
+/// constructing a `Protocol` to compare with `==`. Shared by [`sg`] and
+/// [`nacl`] — both rule types use the same raw-string protocol shape.
+pub(super) fn rule_protocol_matches(rule_protocol: &str, traffic_protocol: Protocol) -> bool {
+    match rule_protocol {
+        "-1" => true,
+        "tcp" => matches!(traffic_protocol, Protocol::Tcp),
+        "udp" => matches!(traffic_protocol, Protocol::Udp),
+        "icmp" | "icmpv6" => matches!(traffic_protocol, Protocol::Icmp { .. }),
+        _ => false,
+    }
+}
+
+/// Whether `traffic_port` (if any) falls within `rule_port_range`
+/// (inclusive), for protocols where ports apply.
+///
+/// Callers must skip this entirely when the rule's protocol is the `-1`
+/// all-protocols sentinel, regardless of what `port_range` it carries.
+///
+/// `rule_port_range: None` (a tcp/udp rule with no port restriction) is
+/// treated as "matches every port" — real AWS API usage always sets
+/// `from_port`/`to_port` for tcp/udp, but the type does not enforce that,
+/// and refusing to match here would silently and incorrectly deny traffic
+/// for a validly-constructed rule the type system permits. `traffic_port:
+/// None` against `Some(rule_port_range)` is treated as a mismatch — a `None`
+/// traffic port carries no port to check inclusion for, so an explicit range
+/// cannot be satisfied. Shared by [`sg`] and [`nacl`].
+pub(super) fn port_matches(rule_port_range: Option<PortRange>, traffic_port: Option<u16>) -> bool {
+    match (rule_port_range, traffic_port) {
+        (None, _) => true,
+        (Some(range), Some(port)) => (range.from_port()..=range.to_port()).contains(&port),
+        (Some(_), None) => false,
+    }
+}
+
+/// Whether `cidr` (`"ip/prefix_len"`, IPv4 or IPv6) contains `address`.
+///
+/// Returns `None` if `cidr` fails to parse as a valid CIDR — callers treat
+/// this as an inert non-match rather than a panic or a propagated error:
+/// values reaching evaluation are expected to already be validated at the
+/// ingestion boundary. Shared by [`sg`] and [`nacl`].
+pub(super) fn cidr_contains(cidr: &str, address: IpAddr) -> Option<bool> {
+    let (network_str, prefix_str) = cidr.split_once('/')?;
+    let network: IpAddr = network_str.parse().ok()?;
+    let prefix_len: u32 = prefix_str.parse().ok()?;
+
+    match (network, address) {
+        (IpAddr::V4(network), IpAddr::V4(address)) => {
+            if prefix_len > 32 {
+                return None;
+            }
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix_len)
+            };
+            Some(u32::from(network) & mask == u32::from(address) & mask)
+        }
+        (IpAddr::V6(network), IpAddr::V6(address)) => {
+            if prefix_len > 128 {
+                return None;
+            }
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix_len)
+            };
+            Some(u128::from(network) & mask == u128::from(address) & mask)
+        }
+        // Mixed families (v4 CIDR vs. v6 peer or vice versa) can never
+        // contain each other.
+        _ => Some(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -259,5 +343,81 @@ mod tests {
             }
         ));
         assert_eq!(traffic.port, None);
+    }
+
+    #[test]
+    fn rule_protocol_matches_all_sentinel_matches_any_traffic_protocol() {
+        // Arrange
+        let rule_protocol = "-1";
+
+        // Act
+        let matches = rule_protocol_matches(rule_protocol, Protocol::Udp);
+
+        // Assert
+        assert!(matches);
+    }
+
+    #[test]
+    fn rule_protocol_matches_tcp_string_does_not_match_udp_traffic() {
+        // Arrange
+        let rule_protocol = "tcp";
+
+        // Act
+        let matches = rule_protocol_matches(rule_protocol, Protocol::Udp);
+
+        // Assert
+        assert!(!matches);
+    }
+
+    #[test]
+    fn port_matches_none_range_matches_any_port() {
+        // Arrange
+        let rule_port_range = None;
+        let traffic_port = Some(8080);
+
+        // Act
+        let matches = port_matches(rule_port_range, traffic_port);
+
+        // Assert
+        assert!(matches);
+    }
+
+    #[test]
+    fn port_matches_some_range_none_traffic_port_returns_false() {
+        // Arrange
+        let rule_port_range = PortRange::new(443, 443).ok();
+        let traffic_port = None;
+
+        // Act
+        let matches = port_matches(rule_port_range, traffic_port);
+
+        // Assert
+        assert!(!matches);
+    }
+
+    #[test]
+    fn cidr_contains_address_inside_prefix_returns_some_true() {
+        // Arrange
+        let cidr = "10.0.0.0/8";
+        let address = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
+
+        // Act
+        let contains = cidr_contains(cidr, address);
+
+        // Assert
+        assert_eq!(contains, Some(true));
+    }
+
+    #[test]
+    fn cidr_contains_malformed_cidr_returns_none() {
+        // Arrange
+        let cidr = "not-a-cidr";
+        let address = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
+
+        // Act
+        let contains = cidr_contains(cidr, address);
+
+        // Assert
+        assert_eq!(contains, None);
     }
 }
