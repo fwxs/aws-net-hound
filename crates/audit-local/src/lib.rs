@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub mod config;
+
 /// `audit-local` command-line interface.
 #[derive(Debug, Parser)]
 #[command(name = "audit-local", about = "Local AWS network topology auditor")]

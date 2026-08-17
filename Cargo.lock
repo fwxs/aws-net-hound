@@ -158,6 +158,9 @@ dependencies = [
  "clap",
  "core",
  "pretty_assertions",
+ "serde",
+ "serde_norway",
+ "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
 ]

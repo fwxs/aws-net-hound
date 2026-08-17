@@ -18,6 +18,9 @@ path = "src/main.rs"
 aws_net_hound_core = { path = "../core", package = "core" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_norway = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
