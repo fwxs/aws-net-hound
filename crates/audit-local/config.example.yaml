@@ -1,0 +1,39 @@
+# Example audit-local configuration. Copy to your own path and edit.
+# All values here are synthetic placeholders — no real account ID, ARN,
+# or hostname. This file is parsed and validated by a test
+# (parse_example_config_file_returns_validated_config in src/config.rs)
+# so it cannot silently drift from the schema.
+
+# AWS region to read topology from. Must be non-empty, lowercase, and
+# contain a '-' (e.g. "us-east-1"). Wrong region: the run queries an
+# account/region with none of the expected resources and produces a
+# misleadingly empty report.
+region: us-east-1
+
+# Name of the AWS CLI profile whose credentials to use for ingestion.
+# Wrong profile: authentication fails before any AWS call succeeds.
+profile: default
+
+# The regulated boundary this run evaluates reachability against. At
+# least one of vpc_ids, cidrs, or tags must be non-empty — an empty
+# boundary would ingest AWS data and evaluate nothing, producing a
+# report indistinguishable from "no findings" when it actually means
+# "nothing was checked".
+boundary:
+  vpc_ids:
+    - vpc-0example
+  cidrs:
+    - 10.0.0.0/16
+  tags: []
+
+# Where the audit report is written. Wrong path: the run succeeds but
+# the report ends up somewhere unexpected, or the write fails if the
+# directory doesn't exist.
+output_path: ./audit-report.json
+
+# Neo4j connection settings. Note: no password field here — the
+# password is read from the NEO4J_PASSWORD environment variable (the
+# same variable docker-compose.yml consumes), never from this file.
+neo4j:
+  uri: bolt://127.0.0.1:7687
+  user: neo4j
