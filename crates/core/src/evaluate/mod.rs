@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EvaluationError;
 
+pub mod sg;
+
 /// Protocol a [`Traffic`] value carries.
 ///
 /// The AWS wire sentinel `-1` ("all protocols") is mapped to [`Protocol::All`]
