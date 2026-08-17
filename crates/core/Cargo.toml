@@ -31,3 +31,4 @@ aws-sdk-ec2 = { workspace = true, features = ["test-util"] }
 aws-smithy-mocks = { workspace = true }
 pretty_assertions = { workspace = true }
 testcontainers = { workspace = true }
+proptest = { workspace = true }

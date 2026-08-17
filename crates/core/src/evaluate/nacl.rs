@@ -46,6 +46,15 @@ use crate::evaluate::{
 /// no rule in `rules` has this direction and when `rules` is empty outright
 /// — there is no separate "no rules configured" state, only the implicit
 /// deny-all falling through.
+///
+/// # Duplicate `rule_number` tie-break
+///
+/// AWS rejects duplicate `rule_number`s at the API level, so this case
+/// should never occur on ingested data — but if it does, the sort below is
+/// stable, so among rules sharing a `rule_number`, whichever appears first
+/// in the input `rules` slice is evaluated first and wins if it matches.
+/// This is deterministic for a given input order, not AWS-specified
+/// behavior (there is none to defer to).
 pub fn evaluate_nacl_egress(
     network_acl_id: &str,
     rules: &[NaclRule],
