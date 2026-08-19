@@ -291,9 +291,32 @@ derived from this document; field names match exactly.
 - `ReachabilityFinding` (Milestone 2 evaluator output, no corresponding
   graph edge yet — computed at query time, not stored): `computed_at`,
   `source`, `destination_boundary` are direct fields; `path_evidence` is a
-  structured `PathEvidence { hops: Vec<Hop> }` listing each traversed
-  node's id and kind, not a pre-rendered string; `severity` is the
-  `Severity` enum (`Low` | `Medium` | `High` | `Critical`).
+  structured `PathEvidence { steps: Vec<EvaluationStep> }` (M2-T5,
+  `crates/core/src/evaluate/path.rs`) listing each layer consulted, the
+  resource id it was evaluated against, and the deciding `Verdict` — not a
+  pre-rendered string; `severity` is the `Severity` enum (`Low` | `Medium` |
+  `High` | `Critical`).
+
+### `PathCandidate` / `EndpointCandidate` crosswalk (M2-T5)
+
+`PathCandidate { source, destination, route_exists }` is the materialized
+input an `Evaluator` judges (`crates/core/src/evaluate/path.rs`), assembled
+by a graph query before evaluation — the fields below map each
+`EndpointCandidate` field (used once for `source`, once for `destination`)
+to the node/edge properties that must be selected:
+
+| `EndpointCandidate` field    | Sourced from                                                        |
+|-------------------------------|----------------------------------------------------------------------|
+| `eni_id`                      | `ENI.id`                                                             |
+| `peer_security_group_ids`     | `HAS_SG` edges from this `ENI`                                       |
+| `security_group_rules`        | `ALLOWS_EGRESS` (for `source`) / `ALLOWS_INGRESS` (for `destination`) edge properties on the ENI's security groups |
+| `subnet_id`                   | `IN_SUBNET` edge target / `ENI.subnet_id`                            |
+| `nacl_rules`                  | `HAS_RULE` properties on the `NetworkACL` reached via `PROTECTED_BY`, sorted by `rule_number` ascending |
+
+`PathCandidate.route_exists` is a `bool` collapsing the `ROUTES_TO`
+traversal between `source` and `destination` to a single fact — see
+`ROUTES_TO`'s `resolved` notes above for how an unresolved target is
+represented upstream of this collapse.
 
 ## Cross-cutting notes
 

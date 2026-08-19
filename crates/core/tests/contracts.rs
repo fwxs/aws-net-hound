@@ -12,16 +12,22 @@
 mod common;
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 
 use aws_net_hound_core::domain::{
-    Action, Direction, Hop, NaclRule, NodeKind, PathEvidence, PortRange, ReachabilityFinding,
-    RuleTarget, Severity, SgRule,
+    Action, Direction, NaclRule, PortRange, ReachabilityFinding, RuleTarget, Severity, SgRule,
 };
 use aws_net_hound_core::error::{EvaluationError, ResolveError};
+use aws_net_hound_core::evaluate::nacl::{evaluate_nacl_egress, evaluate_nacl_ingress};
+use aws_net_hound_core::evaluate::path::{
+    EndpointCandidate, EvaluationLayer, EvaluationStep, PathCandidate, PathEvidence,
+};
+use aws_net_hound_core::evaluate::sg::{evaluate_sg_egress, evaluate_sg_ingress, PeerIdentity};
+use aws_net_hound_core::evaluate::{Protocol, Traffic, Verdict};
 use aws_net_hound_core::ports::{
     BoxFuture, EniRecord, Evaluator, GraphWriter, HasSgEdge, InSubnetEdge, NaclRuleBatch,
-    NetworkAclRecord, PathCandidate, ProtectedByEdge, RegulatedBoundaryRecord, ResolvedReference,
-    Resolver, RouteTableRecord, RoutesToEdge, SecurityGroupRecord, SgRuleBatch, SubnetRecord,
+    NetworkAclRecord, ProtectedByEdge, RegulatedBoundaryRecord, ResolvedReference, Resolver,
+    RouteTableRecord, RoutesToEdge, SecurityGroupRecord, SgRuleBatch, SubnetRecord,
     UsesRouteTableEdge, VpcRecord,
 };
 use common::InMemoryGraphWriter;
@@ -55,56 +61,115 @@ impl Resolver for StaticResolver {
     }
 }
 
-/// Minimal `Evaluator` exercising a trivial intersection: SG rules are
-/// allow-only in AWS, so reachability requires both an egress and an
-/// ingress rule to be present; NACL rules can deny, so the first rule in
-/// each already-sorted (per `PathCandidate`'s contract) direction decides.
-struct IntersectionEvaluator;
+/// Minimal `Evaluator` intersecting all four layers via the real
+/// `evaluate::sg`/`evaluate::nacl` functions (M2-T2/M2-T3), short-circuiting
+/// on the first non-`Allowed` verdict and recording every consulted layer
+/// as an `EvaluationStep`.
+struct IntersectionEvaluator {
+    destination_boundary: String,
+}
 
 impl Evaluator for IntersectionEvaluator {
     fn evaluate(
         &self,
         candidate: &PathCandidate,
     ) -> BoxFuture<'_, Result<Option<ReachabilityFinding>, EvaluationError>> {
-        let result = evaluate_candidate(candidate);
+        let result = evaluate_candidate(candidate, &self.destination_boundary);
         Box::pin(async move { result })
+    }
+}
+
+/// One concrete traffic flow shared across all four layers under test.
+fn sample_traffic() -> Traffic {
+    Traffic {
+        protocol: Protocol::Tcp,
+        port: Some(443),
+        peer_address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
     }
 }
 
 fn evaluate_candidate(
     candidate: &PathCandidate,
+    destination_boundary: &str,
 ) -> Result<Option<ReachabilityFinding>, EvaluationError> {
-    if candidate.hops.is_empty() {
-        return Err(EvaluationError::EmptyPath);
+    let traffic = sample_traffic();
+    let no_peer_sgs: Vec<String> = Vec::new();
+    let source_peer = PeerIdentity {
+        security_group_ids: &no_peer_sgs,
+    };
+    let destination_peer = PeerIdentity {
+        security_group_ids: &candidate.destination.peer_security_group_ids,
+    };
+
+    let steps = [
+        (
+            EvaluationLayer::SgEgress,
+            candidate.source.eni_id.clone(),
+            evaluate_sg_egress(
+                &candidate.source.eni_id,
+                &candidate.source.security_group_rules,
+                &traffic,
+                &destination_peer,
+            ),
+        ),
+        (
+            EvaluationLayer::NaclEgress,
+            candidate.source.subnet_id.clone(),
+            evaluate_nacl_egress(
+                &candidate.source.subnet_id,
+                &candidate.source.nacl_rules,
+                &traffic,
+            ),
+        ),
+        (
+            EvaluationLayer::NaclIngress,
+            candidate.destination.subnet_id.clone(),
+            evaluate_nacl_ingress(
+                &candidate.destination.subnet_id,
+                &candidate.destination.nacl_rules,
+                &traffic,
+            ),
+        ),
+        (
+            EvaluationLayer::SgIngress,
+            candidate.destination.eni_id.clone(),
+            evaluate_sg_ingress(
+                &candidate.destination.eni_id,
+                &candidate.destination.security_group_rules,
+                &traffic,
+                &source_peer,
+            ),
+        ),
+    ];
+
+    let mut evaluation_steps = Vec::with_capacity(steps.len());
+    let mut denied = false;
+    for (layer, resource_id, verdict) in steps {
+        let allowed = matches!(verdict, Verdict::Allowed { .. });
+        evaluation_steps.push(EvaluationStep {
+            layer,
+            resource_id,
+            verdict,
+        });
+        if !allowed {
+            denied = true;
+            break;
+        }
     }
 
-    let sg_allows = !candidate.security_group_egress_rules.is_empty()
-        && !candidate.security_group_ingress_rules.is_empty();
-
-    let nacl_allows = first_action_allows(&candidate.nacl_egress_rules)
-        && first_action_allows(&candidate.nacl_ingress_rules);
-
-    if !(sg_allows && nacl_allows) {
+    if denied {
         return Ok(None);
     }
 
     Ok(Some(ReachabilityFinding {
         computed_at: "2026-08-08T00:00:00Z".to_string(),
-        source: candidate.source.clone(),
-        destination_boundary: candidate.destination_boundary.clone(),
+        source: candidate.source.eni_id.clone(),
+        destination_boundary: destination_boundary.to_string(),
         path_evidence: PathEvidence {
-            hops: candidate.hops.clone(),
+            steps: evaluation_steps,
         },
         severity: Severity::High,
     }))
-}
-
-/// First-match-wins on an already rule-number-sorted slice, per
-/// `PathCandidate::nacl_egress_rules`'s doc comment.
-fn first_action_allows(rules: &[NaclRule]) -> bool {
-    rules
-        .first()
-        .is_some_and(|rule| rule.action == Action::Allow)
 }
 
 fn sample_eni() -> EniRecord {
@@ -141,17 +206,18 @@ fn nacl_rule(rule_number: u16, direction: Direction, action: Action) -> NaclRule
     }
 }
 
-fn sample_hops() -> Vec<Hop> {
-    vec![
-        Hop {
-            node_id: "eni-0example".to_string(),
-            node_kind: NodeKind::Eni,
-        },
-        Hop {
-            node_id: "boundary-pci-prod".to_string(),
-            node_kind: NodeKind::RegulatedBoundary,
-        },
-    ]
+fn sample_endpoint(
+    eni_id: &str,
+    security_group_rules: Vec<SgRule>,
+    nacl_rules: Vec<NaclRule>,
+) -> EndpointCandidate {
+    EndpointCandidate {
+        eni_id: eni_id.to_string(),
+        peer_security_group_ids: Vec::new(),
+        security_group_rules,
+        subnet_id: "subnet-0example".to_string(),
+        nacl_rules,
+    }
 }
 
 #[tokio::test]
@@ -401,15 +467,21 @@ async fn static_resolver_known_local_reference_returns_resolved() {
 #[tokio::test]
 async fn evaluator_sg_allows_but_nacl_denies_returns_not_reachable() {
     // Arrange
-    let evaluator = IntersectionEvaluator;
-    let candidate = PathCandidate {
-        source: "eni-0example".to_string(),
+    let evaluator = IntersectionEvaluator {
         destination_boundary: "boundary-pci-prod".to_string(),
-        hops: sample_hops(),
-        security_group_egress_rules: vec![allow_all_sg_rule(Direction::Egress)],
-        security_group_ingress_rules: vec![allow_all_sg_rule(Direction::Ingress)],
-        nacl_egress_rules: vec![nacl_rule(100, Direction::Egress, Action::Allow)],
-        nacl_ingress_rules: vec![nacl_rule(100, Direction::Ingress, Action::Deny)],
+    };
+    let candidate = PathCandidate {
+        source: sample_endpoint(
+            "eni-source",
+            vec![allow_all_sg_rule(Direction::Egress)],
+            vec![nacl_rule(100, Direction::Egress, Action::Allow)],
+        ),
+        destination: sample_endpoint(
+            "eni-destination",
+            vec![allow_all_sg_rule(Direction::Ingress)],
+            vec![nacl_rule(100, Direction::Ingress, Action::Deny)],
+        ),
+        route_exists: true,
     };
 
     // Act
@@ -425,15 +497,21 @@ async fn evaluator_sg_allows_but_nacl_denies_returns_not_reachable() {
 #[tokio::test]
 async fn evaluator_sg_and_nacl_both_allow_returns_reachability_finding() {
     // Arrange
-    let evaluator = IntersectionEvaluator;
-    let candidate = PathCandidate {
-        source: "eni-0example".to_string(),
+    let evaluator = IntersectionEvaluator {
         destination_boundary: "boundary-pci-prod".to_string(),
-        hops: sample_hops(),
-        security_group_egress_rules: vec![allow_all_sg_rule(Direction::Egress)],
-        security_group_ingress_rules: vec![allow_all_sg_rule(Direction::Ingress)],
-        nacl_egress_rules: vec![nacl_rule(100, Direction::Egress, Action::Allow)],
-        nacl_ingress_rules: vec![nacl_rule(100, Direction::Ingress, Action::Allow)],
+    };
+    let candidate = PathCandidate {
+        source: sample_endpoint(
+            "eni-source",
+            vec![allow_all_sg_rule(Direction::Egress)],
+            vec![nacl_rule(100, Direction::Egress, Action::Allow)],
+        ),
+        destination: sample_endpoint(
+            "eni-destination",
+            vec![allow_all_sg_rule(Direction::Ingress)],
+            vec![nacl_rule(100, Direction::Ingress, Action::Allow)],
+        ),
+        route_exists: true,
     };
 
     // Act
@@ -443,58 +521,56 @@ async fn evaluator_sg_and_nacl_both_allow_returns_reachability_finding() {
         .expect("evaluation succeeds");
 
     // Assert
+    let finding = result.expect("sg and nacl both allow, so a finding is produced");
+    assert_eq!(finding.source, "eni-source");
+    assert_eq!(finding.destination_boundary, "boundary-pci-prod");
+    assert_eq!(finding.severity, Severity::High);
+    let layers: Vec<EvaluationLayer> = finding
+        .path_evidence
+        .steps
+        .iter()
+        .map(|step| step.layer)
+        .collect();
     assert_eq!(
-        result,
-        Some(ReachabilityFinding {
-            computed_at: "2026-08-08T00:00:00Z".to_string(),
-            source: "eni-0example".to_string(),
-            destination_boundary: "boundary-pci-prod".to_string(),
-            path_evidence: PathEvidence {
-                hops: sample_hops(),
-            },
-            severity: Severity::High,
-        })
+        layers,
+        vec![
+            EvaluationLayer::SgEgress,
+            EvaluationLayer::NaclEgress,
+            EvaluationLayer::NaclIngress,
+            EvaluationLayer::SgIngress,
+        ]
     );
-}
-
-#[tokio::test]
-async fn evaluator_empty_path_returns_empty_path_error() {
-    // Arrange
-    let evaluator = IntersectionEvaluator;
-    let candidate = PathCandidate {
-        source: "eni-0example".to_string(),
-        destination_boundary: "boundary-pci-prod".to_string(),
-        hops: Vec::new(),
-        security_group_egress_rules: vec![allow_all_sg_rule(Direction::Egress)],
-        security_group_ingress_rules: vec![allow_all_sg_rule(Direction::Ingress)],
-        nacl_egress_rules: vec![nacl_rule(100, Direction::Egress, Action::Allow)],
-        nacl_ingress_rules: vec![nacl_rule(100, Direction::Ingress, Action::Allow)],
-    };
-
-    // Act
-    let result = evaluator.evaluate(&candidate).await;
-
-    // Assert
-    assert!(matches!(result, Err(EvaluationError::EmptyPath)));
+    assert!(finding
+        .path_evidence
+        .steps
+        .iter()
+        .all(|step| matches!(step.verdict, Verdict::Allowed { .. })));
 }
 
 #[tokio::test]
 async fn evaluator_nacl_lower_numbered_deny_wins_over_higher_numbered_allow() {
     // Arrange
-    let evaluator = IntersectionEvaluator;
-    let candidate = PathCandidate {
-        source: "eni-0example".to_string(),
+    let evaluator = IntersectionEvaluator {
         destination_boundary: "boundary-pci-prod".to_string(),
-        hops: sample_hops(),
-        security_group_egress_rules: vec![allow_all_sg_rule(Direction::Egress)],
-        security_group_ingress_rules: vec![allow_all_sg_rule(Direction::Ingress)],
-        nacl_egress_rules: vec![nacl_rule(100, Direction::Egress, Action::Allow)],
-        // Sorted ascending, per `PathCandidate`'s contract: the lower rule
-        // number (100, Deny) must win over the higher one (200, Allow).
-        nacl_ingress_rules: vec![
-            nacl_rule(100, Direction::Ingress, Action::Deny),
-            nacl_rule(200, Direction::Ingress, Action::Allow),
-        ],
+    };
+    let candidate = PathCandidate {
+        source: sample_endpoint(
+            "eni-source",
+            vec![allow_all_sg_rule(Direction::Egress)],
+            vec![nacl_rule(100, Direction::Egress, Action::Allow)],
+        ),
+        destination: sample_endpoint(
+            "eni-destination",
+            vec![allow_all_sg_rule(Direction::Ingress)],
+            // Sorted ascending, per `EndpointCandidate::nacl_rules`'s doc
+            // comment: the lower rule number (100, Deny) must win over the
+            // higher one (200, Allow).
+            vec![
+                nacl_rule(100, Direction::Ingress, Action::Deny),
+                nacl_rule(200, Direction::Ingress, Action::Allow),
+            ],
+        ),
+        route_exists: true,
     };
 
     // Act

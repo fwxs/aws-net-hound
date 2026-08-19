@@ -5,5 +5,5 @@
 pub mod finding;
 pub mod rule;
 
-pub use finding::{Hop, NodeKind, PathEvidence, ReachabilityFinding, Severity};
+pub use finding::{ReachabilityFinding, Severity};
 pub use rule::{Action, Direction, NaclRule, PortRange, RuleError, RuleTarget, SgRule};

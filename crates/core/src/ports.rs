@@ -7,8 +7,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::domain::{Hop, NaclRule, ReachabilityFinding, SgRule};
+use crate::domain::{NaclRule, ReachabilityFinding, SgRule};
 use crate::error::{EvaluationError, GraphWriteError, ResolveError};
+use crate::evaluate::PathCandidate;
 
 /// A boxed, `Send` future, used so `GraphWriter`, `Resolver`, and `Evaluator`
 /// stay object-safe (`dyn GraphWriter`, etc.) — `-> impl Future` in a public
@@ -291,30 +292,6 @@ pub trait Resolver {
     ) -> BoxFuture<'_, Result<ResolvedReference, ResolveError>>;
 }
 
-/// A materialized reachability path candidate for an [`Evaluator`] to
-/// judge, composed entirely of `core::domain` types with no database
-/// dependency — the caller (Milestone 2) is responsible for loading these
-/// from wherever the graph data lives before calling [`Evaluator::evaluate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathCandidate {
-    /// Unique key of the source node the candidate path starts from.
-    pub source: String,
-    /// `RegulatedBoundary.id` the candidate path is being evaluated against.
-    pub destination_boundary: String,
-    /// Hops traversed, in traversal order (source first, destination last).
-    pub hops: Vec<Hop>,
-    /// Security group egress rules to intersect along the path.
-    pub security_group_egress_rules: Vec<SgRule>,
-    /// Security group ingress rules to intersect along the path.
-    pub security_group_ingress_rules: Vec<SgRule>,
-    /// Network ACL egress rules to intersect along the path, already
-    /// sorted by ascending `rule_number` (first match wins).
-    pub nacl_egress_rules: Vec<NaclRule>,
-    /// Network ACL ingress rules to intersect along the path, already
-    /// sorted by ascending `rule_number` (first match wins).
-    pub nacl_ingress_rules: Vec<NaclRule>,
-}
-
 /// Judges whether a materialized [`PathCandidate`] represents real traffic
 /// reachability, by intersecting security group egress/ingress and NACL
 /// egress/ingress rules.
@@ -331,7 +308,7 @@ pub trait Evaluator {
     /// Evaluates one path candidate, returning `Ok(Some(finding))` when
     /// traffic reaches the destination boundary, `Ok(None)` when it is
     /// blocked by an SG or NACL rule, or `Err` when the candidate itself
-    /// is structurally invalid (e.g. empty `hops`).
+    /// is structurally invalid.
     fn evaluate(
         &self,
         candidate: &PathCandidate,
