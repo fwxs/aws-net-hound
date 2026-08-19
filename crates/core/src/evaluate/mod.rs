@@ -9,7 +9,10 @@ use crate::domain::rule::PortRange;
 use crate::error::EvaluationError;
 
 pub mod nacl;
+pub mod path;
 pub mod sg;
+
+pub use path::{EndpointCandidate, EvaluationLayer, EvaluationStep, PathCandidate, PathEvidence};
 
 /// Protocol a [`Traffic`] value carries.
 ///

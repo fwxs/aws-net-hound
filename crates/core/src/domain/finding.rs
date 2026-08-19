@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::evaluate::path::PathEvidence;
+
 /// Severity of a reachability finding.
 ///
 /// `Ord` is derived from declaration order — `Low < Medium < High <
@@ -20,44 +22,6 @@ pub enum Severity {
     Medium,
     High,
     Critical,
-}
-
-/// The node types a reachability path can hop through, mirroring the node
-/// kinds in `schema.md`. Serialized values match the graph node labels
-/// exactly (`ENI`, `SecurityGroup`, `NetworkACL`, ...), not
-/// `snake_case`, so a `Hop.node_kind` compares directly against a Cypher
-/// label string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NodeKind {
-    #[serde(rename = "ENI")]
-    Eni,
-    SecurityGroup,
-    #[serde(rename = "NetworkACL")]
-    NetworkAcl,
-    Subnet,
-    #[serde(rename = "VPC")]
-    Vpc,
-    RouteTable,
-    RegulatedBoundary,
-}
-
-/// A single hop traversed while computing a reachability finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hop {
-    /// The unique key (e.g. `sg-0example`) of the node at this hop.
-    pub node_id: String,
-    /// The node type at this hop.
-    pub node_kind: NodeKind,
-}
-
-/// The structured path an evaluator traversed to produce a
-/// `ReachabilityFinding`. Kept as structured hops, not a pre-rendered
-/// string, so Milestone 4 can render it in whatever form (table, graph,
-/// text) it needs without re-deriving the path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PathEvidence {
-    /// Hops traversed, in traversal order (source first, destination last).
-    pub hops: Vec<Hop>,
 }
 
 /// A computed reachability finding: a source was found to reach a
@@ -87,21 +51,24 @@ mod tests {
     #[test]
     fn reachability_finding_serializes_structured_path_evidence() {
         // Arrange
+        use crate::evaluate::path::{EvaluationLayer, EvaluationStep};
+        use crate::evaluate::{RuleRef, Verdict};
+
         let finding = ReachabilityFinding {
             computed_at: "2026-08-08T00:00:00Z".to_string(),
             source: "eni-0example".to_string(),
             destination_boundary: "boundary-pci-prod".to_string(),
             path_evidence: PathEvidence {
-                hops: vec![
-                    Hop {
-                        node_id: "eni-0example".to_string(),
-                        node_kind: NodeKind::Eni,
+                steps: vec![EvaluationStep {
+                    layer: EvaluationLayer::SgEgress,
+                    resource_id: "sg-0example".to_string(),
+                    verdict: Verdict::Allowed {
+                        matched_by: RuleRef::SecurityGroup {
+                            security_group_id: "sg-0example".to_string(),
+                            rule_index: 0,
+                        },
                     },
-                    Hop {
-                        node_id: "sg-0example".to_string(),
-                        node_kind: NodeKind::SecurityGroup,
-                    },
-                ],
+                }],
             },
             severity: Severity::High,
         };
@@ -137,22 +104,5 @@ mod tests {
 
         // Assert
         assert_eq!(shuffled, ascending);
-    }
-
-    #[test]
-    fn node_kind_serializes_using_graph_labels() {
-        // Arrange
-        let kinds = [
-            (NodeKind::Eni, "ENI"),
-            (NodeKind::NetworkAcl, "NetworkACL"),
-            (NodeKind::Vpc, "VPC"),
-        ];
-
-        // Act & Assert
-        for (kind, label) in kinds {
-            let serialized = serde_norway::to_string(&kind)
-                .unwrap_or_else(|error| panic!("failed to serialize NodeKind: {error}"));
-            assert_eq!(serialized.trim(), label);
-        }
     }
 }
