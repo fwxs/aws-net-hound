@@ -159,7 +159,7 @@ fn finish_with(
 ) -> ReachabilityFinding {
     let severity = severity_for(&reachability);
     let finding = ReachabilityFinding {
-        computed_at: now_rfc3339(),
+        computed_at: now_rfc3339_utc(),
         source: candidate.source.eni_id.clone(),
         destination_boundary: candidate.destination_boundary.clone(),
         path_evidence,
@@ -220,41 +220,19 @@ fn severity_for(reachability: &Reachability) -> Severity {
     }
 }
 
-/// Current UTC time as an RFC 3339 string (`YYYY-MM-DDTHH:MM:SSZ`), with no
-/// `chrono`/`time` dependency: pure integer arithmetic over
-/// [`std::time::SystemTime`]'s epoch offset (Howard Hinnant's
-/// civil-from-days algorithm). Isolated to this one function so
-/// `evaluate_candidate`'s reachability/evidence logic stays deterministic
-/// and unit-testable without touching the wall clock.
-fn now_rfc3339() -> String {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap_or(std::time::Duration::ZERO);
-    let total_seconds = elapsed.as_secs();
-    let days = (total_seconds / 86_400) as i64;
-    let seconds_of_day = total_seconds % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Days-since-Unix-epoch to (year, month, day), civil calendar, UTC.
-/// Howard Hinnant's `civil_from_days`:
-/// <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-    (year, month, day)
+/// Current UTC time as an RFC 3339 string. `.format()` on a valid
+/// `OffsetDateTime` with the well-known `Rfc3339` descriptor is infallible
+/// in practice (it fails only on formatter-internal errors, never on clock
+/// state), but the workspace lint policy denies `.unwrap()`/`.expect()` in
+/// library code, so a formatting failure is logged and falls back to the
+/// Unix epoch rather than panicking.
+fn now_rfc3339_utc() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to format current time as RFC 3339");
+            "1970-01-01T00:00:00Z".to_string()
+        })
 }
 
 #[cfg(test)]

@@ -1084,6 +1084,7 @@ dependencies = [
  "serde_norway",
  "testcontainers",
  "thiserror 2.0.19",
+ "time",
  "tokio",
  "tracing",
 ]
