@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::rule::{NaclRule, SgRule};
-use crate::evaluate::Verdict;
+use crate::evaluate::{Traffic, Verdict};
 
 /// One endpoint (source or destination) of a [`PathCandidate`].
 ///
@@ -59,6 +59,18 @@ pub struct PathCandidate {
     /// indeterminate, it should become a [`Verdict`] like every other
     /// layer.
     pub route_exists: bool,
+    /// The concrete traffic flow being evaluated across all four layers.
+    ///
+    /// Owned here, not a second argument to
+    /// [`crate::ports::Evaluator::evaluate`], so the candidate stays the
+    /// single self-contained unit of work the trait's `&PathCandidate`-only
+    /// signature requires.
+    pub traffic: Traffic,
+    /// `RegulatedBoundary.id` this candidate's destination is being judged
+    /// against — matched by key, not graph traversal, per `schema.md`. Kept
+    /// here for the same reason as `traffic`: the evaluator only ever sees
+    /// `&PathCandidate`.
+    pub destination_boundary: String,
 }
 
 /// One of the four rule layers an [`EvaluationStep`] can be evaluated
@@ -107,11 +119,21 @@ pub struct PathEvidence {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::domain::rule::{Direction, RuleTarget};
-    use crate::evaluate::{DenyReason, RuleRef};
+    use crate::evaluate::{DenyReason, Protocol, RuleRef};
+
+    fn sample_traffic() -> Traffic {
+        Traffic {
+            protocol: Protocol::Tcp,
+            port: Some(443),
+            peer_address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+        }
+    }
 
     fn allow_all_sg_rule(direction: Direction) -> SgRule {
         SgRule {
@@ -186,6 +208,8 @@ mod tests {
                 vec![allow_all_sg_rule(Direction::Ingress)],
             ),
             route_exists: true,
+            traffic: sample_traffic(),
+            destination_boundary: "boundary-pci-prod".to_string(),
         };
 
         // Act

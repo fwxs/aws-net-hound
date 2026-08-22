@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::evaluate::path::PathEvidence;
+use crate::evaluate::path::{EvaluationLayer, PathEvidence};
 
 /// Severity of a reachability finding.
 ///
@@ -24,7 +24,43 @@ pub enum Severity {
     Critical,
 }
 
-/// A computed reachability finding: a source was found to reach a
+/// The reachability outcome an [`crate::ports::Evaluator`] reached for one
+/// [`crate::evaluate::path::PathCandidate`].
+///
+/// Not a `bool` plus an `indeterminate: bool` flag: that shape permits the
+/// meaningless state "reachable and indeterminate". An indeterminate
+/// verdict on any layer must propagate here rather than collapse into
+/// `NotReachable` — see `RuleIntersectionEvaluator::combine_verdicts`'s doc
+/// comment for why `Denied` still takes precedence over `Indeterminate`
+/// when both occur across different layers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Reachability {
+    /// Every consulted layer allowed the traffic.
+    Reachable,
+    /// At least one layer denied the traffic; evaluation short-circuited
+    /// there, so `path_evidence` ends at the deciding step.
+    ///
+    /// Distinct from "no route existed to evaluate" (also `NotReachable`
+    /// today, when [`crate::evaluate::path::PathCandidate::route_exists`]
+    /// was `false`): the two causes are only distinguishable by checking
+    /// whether `path_evidence.steps` is empty (no-route case) or non-empty
+    /// ending in a `Denied` verdict (explicit-deny case) — see
+    /// `RuleIntersectionEvaluator::evaluate_candidate`'s no-route
+    /// early-return in `engine.rs`. If a consumer ever needs to
+    /// distinguish these operationally, split this into dedicated variants
+    /// rather than growing a side-channel flag; `Reachability` is
+    /// `#[non_exhaustive]` specifically to allow that later.
+    NotReachable,
+    /// No layer denied the traffic, but at least one layer could not reach
+    /// a definite verdict (e.g. an unresolved cross-account security group
+    /// reference). Names which layer(s) so a finding is actionable without
+    /// re-querying the graph.
+    Indeterminate { layers: Vec<EvaluationLayer> },
+}
+
+/// A computed reachability finding: a source was evaluated against a
 /// regulated boundary, with the evidentiary path and its severity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReachabilityFinding {
@@ -39,6 +75,8 @@ pub struct ReachabilityFinding {
     pub destination_boundary: String,
     /// Structured evidence of the path that produced this finding.
     pub path_evidence: PathEvidence,
+    /// The reachability outcome this finding represents.
+    pub reachability: Reachability,
     /// How severe this finding is.
     pub severity: Severity,
 }
@@ -70,6 +108,7 @@ mod tests {
                     },
                 }],
             },
+            reachability: Reachability::Reachable,
             severity: Severity::High,
         };
 
@@ -81,6 +120,23 @@ mod tests {
 
         // Assert
         assert_eq!(roundtripped, finding);
+    }
+
+    #[test]
+    fn reachability_indeterminate_variant_round_trips_with_layers() {
+        // Arrange
+        let reachability = Reachability::Indeterminate {
+            layers: vec![EvaluationLayer::SgEgress, EvaluationLayer::NaclIngress],
+        };
+
+        // Act
+        let serialized = serde_norway::to_string(&reachability)
+            .unwrap_or_else(|error| panic!("failed to serialize Reachability: {error}"));
+        let roundtripped: Reachability = serde_norway::from_str(&serialized)
+            .unwrap_or_else(|error| panic!("failed to deserialize Reachability: {error}"));
+
+        // Assert
+        assert_eq!(roundtripped, reachability);
     }
 
     #[test]

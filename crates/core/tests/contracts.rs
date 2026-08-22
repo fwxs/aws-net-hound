@@ -15,15 +15,11 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use aws_net_hound_core::domain::{
-    Action, Direction, NaclRule, PortRange, ReachabilityFinding, RuleTarget, Severity, SgRule,
+    Action, Direction, NaclRule, PortRange, Reachability, RuleTarget, Severity, SgRule,
 };
-use aws_net_hound_core::error::{EvaluationError, ResolveError};
-use aws_net_hound_core::evaluate::nacl::{evaluate_nacl_egress, evaluate_nacl_ingress};
-use aws_net_hound_core::evaluate::path::{
-    EndpointCandidate, EvaluationLayer, EvaluationStep, PathCandidate, PathEvidence,
-};
-use aws_net_hound_core::evaluate::sg::{evaluate_sg_egress, evaluate_sg_ingress, PeerIdentity};
-use aws_net_hound_core::evaluate::{Protocol, Traffic, Verdict};
+use aws_net_hound_core::error::ResolveError;
+use aws_net_hound_core::evaluate::path::{EndpointCandidate, EvaluationLayer, PathCandidate};
+use aws_net_hound_core::evaluate::{Protocol, RuleIntersectionEvaluator, Traffic, Verdict};
 use aws_net_hound_core::ports::{
     BoxFuture, EniRecord, Evaluator, GraphWriter, HasSgEdge, InSubnetEdge, NaclRuleBatch,
     NetworkAclRecord, ProtectedByEdge, RegulatedBoundaryRecord, ResolvedReference, Resolver,
@@ -61,24 +57,6 @@ impl Resolver for StaticResolver {
     }
 }
 
-/// Minimal `Evaluator` intersecting all four layers via the real
-/// `evaluate::sg`/`evaluate::nacl` functions (M2-T2/M2-T3), short-circuiting
-/// on the first non-`Allowed` verdict and recording every consulted layer
-/// as an `EvaluationStep`.
-struct IntersectionEvaluator {
-    destination_boundary: String,
-}
-
-impl Evaluator for IntersectionEvaluator {
-    fn evaluate(
-        &self,
-        candidate: &PathCandidate,
-    ) -> BoxFuture<'_, Result<Option<ReachabilityFinding>, EvaluationError>> {
-        let result = evaluate_candidate(candidate, &self.destination_boundary);
-        Box::pin(async move { result })
-    }
-}
-
 /// One concrete traffic flow shared across all four layers under test.
 fn sample_traffic() -> Traffic {
     Traffic {
@@ -86,90 +64,6 @@ fn sample_traffic() -> Traffic {
         port: Some(443),
         peer_address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
     }
-}
-
-fn evaluate_candidate(
-    candidate: &PathCandidate,
-    destination_boundary: &str,
-) -> Result<Option<ReachabilityFinding>, EvaluationError> {
-    let traffic = sample_traffic();
-    let no_peer_sgs: Vec<String> = Vec::new();
-    let source_peer = PeerIdentity {
-        security_group_ids: &no_peer_sgs,
-    };
-    let destination_peer = PeerIdentity {
-        security_group_ids: &candidate.destination.peer_security_group_ids,
-    };
-
-    let steps = [
-        (
-            EvaluationLayer::SgEgress,
-            candidate.source.eni_id.clone(),
-            evaluate_sg_egress(
-                &candidate.source.eni_id,
-                &candidate.source.security_group_rules,
-                &traffic,
-                &destination_peer,
-            ),
-        ),
-        (
-            EvaluationLayer::NaclEgress,
-            candidate.source.subnet_id.clone(),
-            evaluate_nacl_egress(
-                &candidate.source.subnet_id,
-                &candidate.source.nacl_rules,
-                &traffic,
-            ),
-        ),
-        (
-            EvaluationLayer::NaclIngress,
-            candidate.destination.subnet_id.clone(),
-            evaluate_nacl_ingress(
-                &candidate.destination.subnet_id,
-                &candidate.destination.nacl_rules,
-                &traffic,
-            ),
-        ),
-        (
-            EvaluationLayer::SgIngress,
-            candidate.destination.eni_id.clone(),
-            evaluate_sg_ingress(
-                &candidate.destination.eni_id,
-                &candidate.destination.security_group_rules,
-                &traffic,
-                &source_peer,
-            ),
-        ),
-    ];
-
-    let mut evaluation_steps = Vec::with_capacity(steps.len());
-    let mut denied = false;
-    for (layer, resource_id, verdict) in steps {
-        let allowed = matches!(verdict, Verdict::Allowed { .. });
-        evaluation_steps.push(EvaluationStep {
-            layer,
-            resource_id,
-            verdict,
-        });
-        if !allowed {
-            denied = true;
-            break;
-        }
-    }
-
-    if denied {
-        return Ok(None);
-    }
-
-    Ok(Some(ReachabilityFinding {
-        computed_at: "2026-08-08T00:00:00Z".to_string(),
-        source: candidate.source.eni_id.clone(),
-        destination_boundary: destination_boundary.to_string(),
-        path_evidence: PathEvidence {
-            steps: evaluation_steps,
-        },
-        severity: Severity::High,
-    }))
 }
 
 fn sample_eni() -> EniRecord {
@@ -467,9 +361,7 @@ async fn static_resolver_known_local_reference_returns_resolved() {
 #[tokio::test]
 async fn evaluator_sg_allows_but_nacl_denies_returns_not_reachable() {
     // Arrange
-    let evaluator = IntersectionEvaluator {
-        destination_boundary: "boundary-pci-prod".to_string(),
-    };
+    let evaluator = RuleIntersectionEvaluator;
     let candidate = PathCandidate {
         source: sample_endpoint(
             "eni-source",
@@ -482,6 +374,8 @@ async fn evaluator_sg_allows_but_nacl_denies_returns_not_reachable() {
             vec![nacl_rule(100, Direction::Ingress, Action::Deny)],
         ),
         route_exists: true,
+        traffic: sample_traffic(),
+        destination_boundary: "boundary-pci-prod".to_string(),
     };
 
     // Act
@@ -491,15 +385,13 @@ async fn evaluator_sg_allows_but_nacl_denies_returns_not_reachable() {
         .expect("evaluation succeeds");
 
     // Assert
-    assert_eq!(result, None);
+    assert_eq!(result.reachability, Reachability::NotReachable);
 }
 
 #[tokio::test]
 async fn evaluator_sg_and_nacl_both_allow_returns_reachability_finding() {
     // Arrange
-    let evaluator = IntersectionEvaluator {
-        destination_boundary: "boundary-pci-prod".to_string(),
-    };
+    let evaluator = RuleIntersectionEvaluator;
     let candidate = PathCandidate {
         source: sample_endpoint(
             "eni-source",
@@ -512,16 +404,18 @@ async fn evaluator_sg_and_nacl_both_allow_returns_reachability_finding() {
             vec![nacl_rule(100, Direction::Ingress, Action::Allow)],
         ),
         route_exists: true,
+        traffic: sample_traffic(),
+        destination_boundary: "boundary-pci-prod".to_string(),
     };
 
     // Act
-    let result = evaluator
+    let finding = evaluator
         .evaluate(&candidate)
         .await
         .expect("evaluation succeeds");
 
     // Assert
-    let finding = result.expect("sg and nacl both allow, so a finding is produced");
+    assert_eq!(finding.reachability, Reachability::Reachable);
     assert_eq!(finding.source, "eni-source");
     assert_eq!(finding.destination_boundary, "boundary-pci-prod");
     assert_eq!(finding.severity, Severity::High);
@@ -550,9 +444,7 @@ async fn evaluator_sg_and_nacl_both_allow_returns_reachability_finding() {
 #[tokio::test]
 async fn evaluator_nacl_lower_numbered_deny_wins_over_higher_numbered_allow() {
     // Arrange
-    let evaluator = IntersectionEvaluator {
-        destination_boundary: "boundary-pci-prod".to_string(),
-    };
+    let evaluator = RuleIntersectionEvaluator;
     let candidate = PathCandidate {
         source: sample_endpoint(
             "eni-source",
@@ -571,6 +463,8 @@ async fn evaluator_nacl_lower_numbered_deny_wins_over_higher_numbered_allow() {
             ],
         ),
         route_exists: true,
+        traffic: sample_traffic(),
+        destination_boundary: "boundary-pci-prod".to_string(),
     };
 
     // Act
@@ -580,5 +474,5 @@ async fn evaluator_nacl_lower_numbered_deny_wins_over_higher_numbered_allow() {
         .expect("evaluation succeeds");
 
     // Assert
-    assert_eq!(result, None);
+    assert_eq!(result.reachability, Reachability::NotReachable);
 }

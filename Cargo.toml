@@ -18,6 +18,7 @@ serde_norway = "0.9.42"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1.44"
+time = { version = "0.3.55", default-features = false, features = ["formatting"] }
 aws-smithy-mocks = "0.3.0"
 pretty_assertions = "1.4.1"
 testcontainers = "0.28.0"
