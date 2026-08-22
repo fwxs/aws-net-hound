@@ -302,15 +302,17 @@ pub trait Resolver {
 /// in its signature — Milestone 2 depends on being able to unit-test SG/NACL
 /// intersection logic (correctness-critical) without a live database.
 /// Implementors may assume `candidate` is already fully materialized (no
-/// further graph traversal needed) and must return `Ok(None)` — not an
-/// `Err` — when the candidate does not represent reachable traffic.
+/// further graph traversal needed) and must return `Ok` for every
+/// structurally valid candidate regardless of reachability outcome:
+/// `Reachable`, `NotReachable`, and `Indeterminate` are all successful
+/// results with full evidence. `Err` is reserved for a structurally
+/// invalid candidate itself, never for "not reachable".
 pub trait Evaluator {
-    /// Evaluates one path candidate, returning `Ok(Some(finding))` when
-    /// traffic reaches the destination boundary, `Ok(None)` when it is
-    /// blocked by an SG or NACL rule, or `Err` when the candidate itself
-    /// is structurally invalid.
+    /// Evaluates one path candidate, always returning a finding — the
+    /// finding's `reachability` field carries the outcome. `Err` only when
+    /// `candidate` itself is structurally invalid.
     fn evaluate(
         &self,
         candidate: &PathCandidate,
-    ) -> BoxFuture<'_, Result<Option<ReachabilityFinding>, EvaluationError>>;
+    ) -> BoxFuture<'_, Result<ReachabilityFinding, EvaluationError>>;
 }

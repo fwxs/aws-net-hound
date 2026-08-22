@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use crate::domain::rule::PortRange;
 use crate::error::EvaluationError;
 
+pub mod engine;
 pub mod nacl;
 pub mod path;
 pub mod sg;
 
+pub use engine::RuleIntersectionEvaluator;
 pub use path::{EndpointCandidate, EvaluationLayer, EvaluationStep, PathCandidate, PathEvidence};
 
 /// Protocol a [`Traffic`] value carries.
@@ -66,7 +68,7 @@ impl TryFrom<i32> for Protocol {
 ///
 /// Constructed once by the caller (M2-T6) and passed by reference to every
 /// layer function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Traffic {
     /// Protocol of this traffic, carrying any protocol-specific payload
     /// (e.g. ICMP type/code).

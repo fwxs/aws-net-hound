@@ -294,16 +294,22 @@ derived from this document; field names match exactly.
   structured `PathEvidence { steps: Vec<EvaluationStep> }` (M2-T5,
   `crates/core/src/evaluate/path.rs`) listing each layer consulted, the
   resource id it was evaluated against, and the deciding `Verdict` — not a
-  pre-rendered string; `severity` is the `Severity` enum (`Low` | `Medium` |
-  `High` | `Critical`).
+  pre-rendered string; `reachability` is the `Reachability` enum (`Reachable`
+  | `NotReachable` | `Indeterminate { layers }`, M2-T6,
+  `crates/core/src/domain/finding.rs`) — never a `bool` plus an
+  `indeterminate` flag, since that shape would permit the meaningless state
+  "reachable and indeterminate"; `severity` is the `Severity` enum (`Low` |
+  `Medium` | `High` | `Critical`), derived from `reachability` alone today
+  (no regime-aware boundary lookup exists yet).
 
-### `PathCandidate` / `EndpointCandidate` crosswalk (M2-T5)
+### `PathCandidate` / `EndpointCandidate` crosswalk (M2-T5, M2-T6)
 
-`PathCandidate { source, destination, route_exists }` is the materialized
-input an `Evaluator` judges (`crates/core/src/evaluate/path.rs`), assembled
-by a graph query before evaluation — the fields below map each
-`EndpointCandidate` field (used once for `source`, once for `destination`)
-to the node/edge properties that must be selected:
+`PathCandidate { source, destination, route_exists, traffic,
+destination_boundary }` is the materialized input an `Evaluator` judges
+(`crates/core/src/evaluate/path.rs`), assembled by a graph query before
+evaluation — the fields below map each `EndpointCandidate` field (used once
+for `source`, once for `destination`) to the node/edge properties that must
+be selected:
 
 | `EndpointCandidate` field    | Sourced from                                                        |
 |-------------------------------|----------------------------------------------------------------------|
@@ -317,6 +323,12 @@ to the node/edge properties that must be selected:
 traversal between `source` and `destination` to a single fact — see
 `ROUTES_TO`'s `resolved` notes above for how an unresolved target is
 represented upstream of this collapse.
+
+`PathCandidate.traffic` (the concrete `Traffic` flow being evaluated) and
+`PathCandidate.destination_boundary` (the `RegulatedBoundary.id` this
+candidate is judged against) are carried on the candidate itself, not passed
+as separate arguments to `Evaluator::evaluate` — the trait's contract takes
+only `&PathCandidate`, so both fields must be self-contained on it.
 
 ## Cross-cutting notes
 
