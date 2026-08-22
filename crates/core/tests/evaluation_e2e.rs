@@ -23,14 +23,6 @@ use aws_net_hound_core::evaluate::{
 use aws_net_hound_core::ports::Evaluator;
 use pretty_assertions::assert_eq;
 
-fn sample_traffic() -> Traffic {
-    Traffic {
-        protocol: Protocol::Tcp,
-        port: Some(443),
-        peer_address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
-    }
-}
-
 fn allow_all_sg_rule(direction: Direction) -> SgRule {
     SgRule {
         direction,
@@ -100,7 +92,11 @@ fn fully_permissive_candidate() -> PathCandidate {
         source: permissive_endpoint("eni-0source", "subnet-0source"),
         destination: permissive_endpoint("eni-0destination", "subnet-0destination"),
         route_exists: true,
-        traffic: sample_traffic(),
+        traffic: Traffic {
+            protocol: Protocol::Tcp,
+            port: Some(443),
+            peer_address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+        },
         destination_boundary: "boundary-pci-prod".to_string(),
     }
 }
