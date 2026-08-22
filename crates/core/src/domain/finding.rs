@@ -41,6 +41,17 @@ pub enum Reachability {
     Reachable,
     /// At least one layer denied the traffic; evaluation short-circuited
     /// there, so `path_evidence` ends at the deciding step.
+    ///
+    /// Distinct from "no route existed to evaluate" (also `NotReachable`
+    /// today, when [`crate::evaluate::path::PathCandidate::route_exists`]
+    /// was `false`): the two causes are only distinguishable by checking
+    /// whether `path_evidence.steps` is empty (no-route case) or non-empty
+    /// ending in a `Denied` verdict (explicit-deny case) — see
+    /// `RuleIntersectionEvaluator::evaluate_candidate`'s no-route
+    /// early-return in `engine.rs`. If a consumer ever needs to
+    /// distinguish these operationally, split this into dedicated variants
+    /// rather than growing a side-channel flag; `Reachability` is
+    /// `#[non_exhaustive]` specifically to allow that later.
     NotReachable,
     /// No layer denied the traffic, but at least one layer could not reach
     /// a definite verdict (e.g. an unresolved cross-account security group
