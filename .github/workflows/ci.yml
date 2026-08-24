@@ -67,4 +67,5 @@ jobs:
       - name: Docker-gated integration tests
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
+          NEO4J_PASSWORD: ci-integration-test-password
         run: cargo test --workspace -- --ignored
