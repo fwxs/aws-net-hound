@@ -1,6 +1,7 @@
 use clap::Parser;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -10,7 +11,7 @@ fn main() {
         .init();
 
     let cli = audit_local::Cli::parse();
-    let code = match audit_local::dispatch(cli.command) {
+    let code = match audit_local::dispatch(cli.command).await {
         Ok(outcome) => outcome.exit_code(),
         Err(err) => {
             tracing::error!("{err:#}");

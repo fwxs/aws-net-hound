@@ -16,7 +16,7 @@ neo4rs = "0.8.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_norway = "0.9.42"
 thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "process"] }
 tracing = "0.1.44"
 time = { version = "0.3.55", default-features = false, features = ["formatting"] }
 aws-smithy-mocks = "0.3.0"

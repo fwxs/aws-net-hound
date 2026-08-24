@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub mod config;
+pub mod preflight;
 
 /// `audit-local` command-line interface.
 #[derive(Debug, Parser)]
@@ -67,13 +68,19 @@ impl Outcome {
 
 /// Dispatch a parsed [`Command`] to its implementation.
 ///
-/// `Run` and `Preflight` orchestration land in later milestone-3 tasks;
-/// this placeholder keeps the CLI skeleton buildable and testable on its
-/// own.
-pub fn dispatch(command: Command) -> anyhow::Result<Outcome> {
+/// `Run`'s own orchestration lands in a later milestone-3 task; this
+/// placeholder keeps the CLI skeleton buildable and testable on its own,
+/// but the environment preflight already runs as its mandatory first step.
+pub async fn dispatch(command: Command) -> anyhow::Result<Outcome> {
     match command {
-        Command::Run { config: _ } => Ok(Outcome::Clean),
-        Command::Preflight => Ok(Outcome::Clean),
+        Command::Run { config: _ } => {
+            preflight::run().await?;
+            Ok(Outcome::Clean)
+        }
+        Command::Preflight => {
+            preflight::run().await?;
+            Ok(Outcome::Clean)
+        }
     }
 }
 
