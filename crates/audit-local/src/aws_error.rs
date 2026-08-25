@@ -41,6 +41,20 @@ pub enum AwsFailure {
         source: anyhow::Error,
     },
 
+    /// No credential provider (profile, environment variables, IMDS, etc.)
+    /// produced usable credentials at all — distinct from
+    /// [`AwsFailure::ProfileNotFound`], which names a specific bad profile.
+    #[error(
+        "no AWS credentials found — configure a profile, environment variables, \
+         or an instance role and retry"
+    )]
+    CredentialsNotConfigured {
+        /// The original credentials-resolution error, kept for `debug!`
+        /// diagnosis only.
+        #[source]
+        source: anyhow::Error,
+    },
+
     /// Credentials were valid at some point but have since expired (an SSO
     /// or STS session that timed out).
     #[error("AWS credentials expired — refresh your SSO session (e.g. `aws sso login`) and retry")]
@@ -91,6 +105,12 @@ pub enum AwsFailure {
 /// requires. Mirrors the five collectors in
 /// `aws_net_hound_core::ingest::collect` plus the STS call
 /// `aws_net_hound_core::ingest::aws_client::resolve_account_id` makes.
+///
+/// TODO: this list has no compile-time link to `core::ingest::collect`. A
+/// new collector (e.g. `DescribeSubnets`/`DescribeVpcs`, planned for
+/// boundary CIDR/tag matching) needs a matching arm added here and in
+/// [`classify_describe_error`] or its `AccessDenied` degrades to the
+/// generic fallback message.
 fn iam_action_for(operation: &'static str) -> &'static str {
     match operation {
         "DescribeSecurityGroups" => "ec2:DescribeSecurityGroups",
@@ -112,6 +132,7 @@ enum Class {
     ProfileNotFound {
         profile: String,
     },
+    CredentialsNotConfigured,
     ExpiredCredentials,
     AccessDenied {
         operation: &'static str,
@@ -124,6 +145,7 @@ impl Class {
     fn into_failure(self, source: anyhow::Error) -> AwsFailure {
         match self {
             Class::ProfileNotFound { profile } => AwsFailure::ProfileNotFound { profile, source },
+            Class::CredentialsNotConfigured => AwsFailure::CredentialsNotConfigured { source },
             Class::ExpiredCredentials => AwsFailure::ExpiredCredentials { source },
             Class::AccessDenied {
                 operation,
@@ -162,13 +184,19 @@ fn classify_code(operation: &'static str, code: Option<&str>) -> Option<Class> {
 /// isn't one of the classes this module distinguishes (e.g. a timeout or
 /// an unhandled provider error falls through to [`AwsFailure::Other`] at
 /// the call site).
+///
+/// `CredentialsNotLoaded` means no provider (profile, env vars, IMDS, ...)
+/// produced credentials at all, which is not necessarily a bad profile
+/// name — it maps to the more general
+/// [`Class::CredentialsNotConfigured`]. `InvalidConfiguration` means a
+/// profile was named but its configuration is malformed, which does point
+/// at a specific profile — it maps to [`Class::ProfileNotFound`].
 fn classify_credentials_error(error: &CredentialsError, profile: Option<&str>) -> Option<Class> {
     match error {
-        CredentialsError::CredentialsNotLoaded(_) | CredentialsError::InvalidConfiguration(_) => {
-            Some(Class::ProfileNotFound {
-                profile: profile.unwrap_or("default").to_string(),
-            })
-        }
+        CredentialsError::CredentialsNotLoaded(_) => Some(Class::CredentialsNotConfigured),
+        CredentialsError::InvalidConfiguration(_) => Some(Class::ProfileNotFound {
+            profile: profile.unwrap_or("default").to_string(),
+        }),
         _ => None,
     }
 }
@@ -266,7 +294,8 @@ mod tests {
     #[test]
     fn classify_missing_profile_error_returns_profile_not_found() {
         // Arrange
-        let credentials_error = CredentialsError::not_loaded("no profile named 'staging'");
+        let credentials_error =
+            CredentialsError::invalid_configuration("profile 'staging' is malformed");
         let error = anyhow::Error::new(credentials_error);
 
         // Act
@@ -274,6 +303,22 @@ mod tests {
 
         // Assert
         assert!(matches!(failure, AwsFailure::ProfileNotFound { .. }));
+    }
+
+    #[test]
+    fn classify_no_provider_error_returns_credentials_not_configured() {
+        // Arrange
+        let credentials_error = CredentialsError::not_loaded("no credentials in the chain");
+        let error = anyhow::Error::new(credentials_error);
+
+        // Act
+        let failure = classify("GetCallerIdentity", error);
+
+        // Assert
+        assert!(matches!(
+            failure,
+            AwsFailure::CredentialsNotConfigured { .. }
+        ));
     }
 
     #[test]
