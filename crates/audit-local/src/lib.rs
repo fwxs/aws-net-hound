@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
+pub mod aws_error;
 pub mod config;
 pub mod preflight;
 pub mod run;
