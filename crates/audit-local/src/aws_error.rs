@@ -21,10 +21,12 @@ use aws_smithy_runtime_api::client::result::SdkError;
 /// An AWS ingestion failure classified into an operator-actionable class.
 ///
 /// Each variant's message is written for the operator, not the developer:
-/// it names what went wrong and what to do next. The original SDK error
-/// is always preserved as [`std::error::Error::source`] on [`AwsFailure::Other`],
-/// or discarded only for the classified variants where the message already
-/// says everything actionable.
+/// it names what went wrong and what to do next. Every variant preserves
+/// the original SDK error as [`std::error::Error::source`] — never printed
+/// at operator-facing level (the `Display` impl this derive generates
+/// never includes it), but available to `tracing::debug!(error = ?failure,
+/// ..)` at the call site or to whoever files a support case with the
+/// request ID.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AwsFailure {
@@ -33,21 +35,35 @@ pub enum AwsFailure {
     ProfileNotFound {
         /// The profile name that could not be resolved.
         profile: String,
+        /// The original credentials-resolution error, kept for `debug!`
+        /// diagnosis only — never rendered in the operator-facing message.
+        #[source]
+        source: anyhow::Error,
     },
 
     /// Credentials were valid at some point but have since expired (an SSO
     /// or STS session that timed out).
     #[error("AWS credentials expired — refresh your SSO session (e.g. `aws sso login`) and retry")]
-    ExpiredCredentials,
+    ExpiredCredentials {
+        /// The original SDK error, kept for `debug!` diagnosis only.
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// The caller's IAM identity lacks the permission required for the
     /// failing operation.
-    #[error("access denied calling {operation} — the caller's IAM identity needs the {iam_action} permission")]
+    #[error(
+        "access denied calling {operation} — the caller's IAM identity needs the \
+         {iam_action} permission"
+    )]
     AccessDenied {
         /// The failing `Describe*`/API operation name.
         operation: &'static str,
         /// The IAM action required for `operation`, e.g. `"ec2:DescribeSecurityGroups"`.
         iam_action: &'static str,
+        /// The original SDK error, kept for `debug!` diagnosis only.
+        #[source]
+        source: anyhow::Error,
     },
 
     /// The request was throttled and the client's retry policy was
@@ -55,7 +71,11 @@ pub enum AwsFailure {
     #[error(
         "AWS request throttled after retries were exhausted — retry later or reduce concurrency"
     )]
-    Throttled,
+    Throttled {
+        /// The original SDK error, kept for `debug!` diagnosis only.
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// An AWS failure that doesn't fit any of the above classes. The
     /// original error is preserved as `source` and not paraphrased.
@@ -83,39 +103,69 @@ fn iam_action_for(operation: &'static str) -> &'static str {
     }
 }
 
+/// The class an ingestion failure was recognized as, before the original
+/// error is attached as its `source`. Kept separate from [`AwsFailure`] so
+/// classification can borrow from `error`'s chain and only take ownership
+/// of `error` itself once, after a match is found — seeing which class
+/// matched never requires consuming the error being classified.
+enum Class {
+    ProfileNotFound {
+        profile: String,
+    },
+    ExpiredCredentials,
+    AccessDenied {
+        operation: &'static str,
+        iam_action: &'static str,
+    },
+    Throttled,
+}
+
+impl Class {
+    fn into_failure(self, source: anyhow::Error) -> AwsFailure {
+        match self {
+            Class::ProfileNotFound { profile } => AwsFailure::ProfileNotFound { profile, source },
+            Class::ExpiredCredentials => AwsFailure::ExpiredCredentials { source },
+            Class::AccessDenied {
+                operation,
+                iam_action,
+            } => AwsFailure::AccessDenied {
+                operation,
+                iam_action,
+                source,
+            },
+            Class::Throttled => AwsFailure::Throttled { source },
+        }
+    }
+}
+
 /// Classifies an AWS error code (as returned by the SDK's own
 /// [`ProvideErrorMetadata::code`]) for the given failing `operation` into
-/// an [`AwsFailure`], or `None` if the code isn't one of the classes this
-/// module distinguishes.
-fn classify_code(operation: &'static str, code: Option<&str>) -> Option<AwsFailure> {
+/// a [`Class`], or `None` if the code isn't one of the classes this module
+/// distinguishes.
+fn classify_code(operation: &'static str, code: Option<&str>) -> Option<Class> {
     match code? {
         "ExpiredToken" | "RequestExpired" | "ExpiredTokenException" => {
-            Some(AwsFailure::ExpiredCredentials)
+            Some(Class::ExpiredCredentials)
         }
         "UnauthorizedOperation" | "AccessDenied" | "AccessDeniedException" | "AuthFailure" => {
-            Some(AwsFailure::AccessDenied {
+            Some(Class::AccessDenied {
                 operation,
                 iam_action: iam_action_for(operation),
             })
         }
-        "RequestLimitExceeded" | "Throttling" | "ThrottlingException" => {
-            Some(AwsFailure::Throttled)
-        }
+        "RequestLimitExceeded" | "Throttling" | "ThrottlingException" => Some(Class::Throttled),
         _ => None,
     }
 }
 
-/// Classifies a [`CredentialsError`] into an [`AwsFailure`], or `None` if
-/// it isn't one of the classes this module distinguishes (e.g. a timeout
-/// or an unhandled provider error falls through to [`AwsFailure::Other`]
-/// at the call site).
-fn classify_credentials_error(
-    error: &CredentialsError,
-    profile: Option<&str>,
-) -> Option<AwsFailure> {
+/// Classifies a [`CredentialsError`] into a [`Class`], or `None` if it
+/// isn't one of the classes this module distinguishes (e.g. a timeout or
+/// an unhandled provider error falls through to [`AwsFailure::Other`] at
+/// the call site).
+fn classify_credentials_error(error: &CredentialsError, profile: Option<&str>) -> Option<Class> {
     match error {
         CredentialsError::CredentialsNotLoaded(_) | CredentialsError::InvalidConfiguration(_) => {
-            Some(AwsFailure::ProfileNotFound {
+            Some(Class::ProfileNotFound {
                 profile: profile.unwrap_or("default").to_string(),
             })
         }
@@ -130,32 +180,34 @@ fn classify_credentials_error(
 /// Walks `error`'s source chain looking, in order, for: a [`CredentialsError`]
 /// (missing/misconfigured profile), an EC2/STS error code recognized by
 /// [`classify_code`] (expired session, access denied, throttled). Anything
-/// else falls through to [`AwsFailure::Other`], preserving `error` as the
-/// source rather than paraphrasing it.
+/// else falls through to [`AwsFailure::Other`]. `error` itself — the full
+/// chain, not just the matched link — is always preserved as the returned
+/// variant's `source`, so `RUST_LOG=debug` can still see the request ID and
+/// raw SDK detail this module's `Display` output deliberately omits.
 pub fn classify(operation: &'static str, error: anyhow::Error) -> AwsFailure {
     let profile = std::env::var("AWS_PROFILE").ok();
 
-    for cause in error.chain() {
+    let class = error.chain().find_map(|cause| {
         if let Some(credentials_error) = cause.downcast_ref::<CredentialsError>() {
-            if let Some(failure) = classify_credentials_error(credentials_error, profile.as_deref())
-            {
-                return failure;
+            if let Some(class) = classify_credentials_error(credentials_error, profile.as_deref()) {
+                return Some(class);
             }
         }
         if let Some(sdk_error) = cause.downcast_ref::<SdkError<
             aws_sdk_sts::operation::get_caller_identity::GetCallerIdentityError,
             HttpResponse,
         >>() {
-            if let Some(failure) = classify_code(operation, sdk_error.code()) {
-                return failure;
+            if let Some(class) = classify_code(operation, sdk_error.code()) {
+                return Some(class);
             }
         }
-        if let Some(failure) = classify_describe_error(operation, cause) {
-            return failure;
-        }
-    }
+        classify_describe_error(operation, cause)
+    });
 
-    AwsFailure::Other { source: error }
+    match class {
+        Some(class) => class.into_failure(error),
+        None => AwsFailure::Other { source: error },
+    }
 }
 
 /// Tries each of the five `Describe*` operation error types in turn,
@@ -164,7 +216,7 @@ pub fn classify(operation: &'static str, error: anyhow::Error) -> AwsFailure {
 fn classify_describe_error(
     operation: &'static str,
     cause: &(dyn std::error::Error + 'static),
-) -> Option<AwsFailure> {
+) -> Option<Class> {
     use aws_sdk_ec2::operation::{
         describe_network_acls::DescribeNetworkAclsError,
         describe_network_interfaces::DescribeNetworkInterfacesError,
@@ -241,7 +293,7 @@ mod tests {
         let failure = classify("GetCallerIdentity", error);
 
         // Assert
-        assert!(matches!(failure, AwsFailure::ExpiredCredentials));
+        assert!(matches!(failure, AwsFailure::ExpiredCredentials { .. }));
     }
 
     #[test]
@@ -266,9 +318,19 @@ mod tests {
             AwsFailure::AccessDenied {
                 operation,
                 iam_action,
+                source,
             } => {
                 assert_eq!(operation, "DescribeSecurityGroups");
                 assert_eq!(iam_action, "ec2:DescribeSecurityGroups");
+                assert!(
+                    source
+                        .downcast_ref::<SdkError<
+                            aws_sdk_ec2::operation::describe_security_groups::DescribeSecurityGroupsError,
+                            HttpResponse,
+                        >>()
+                        .is_some(),
+                    "classified failures must keep the original SDK error as source for debug diagnosis"
+                );
             }
             other => panic!("expected AccessDenied, got {other:?}"),
         }
@@ -291,7 +353,7 @@ mod tests {
         let failure = classify("DescribeRouteTables", error);
 
         // Assert
-        assert!(matches!(failure, AwsFailure::Throttled));
+        assert!(matches!(failure, AwsFailure::Throttled { .. }));
     }
 
     #[test]
