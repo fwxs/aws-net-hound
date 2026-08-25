@@ -5,10 +5,12 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 pub mod config;
 pub mod preflight;
+pub mod run;
 
 /// `audit-local` command-line interface.
 #[derive(Debug, Parser)]
@@ -67,15 +69,12 @@ impl Outcome {
 }
 
 /// Dispatch a parsed [`Command`] to its implementation.
-///
-/// `Run`'s own orchestration lands in a later milestone-3 task; this
-/// placeholder keeps the CLI skeleton buildable and testable on its own,
-/// but the environment preflight already runs as its mandatory first step.
 pub async fn dispatch(command: Command) -> anyhow::Result<Outcome> {
     match command {
-        Command::Run { config: _ } => {
-            preflight::run().await?;
-            Ok(Outcome::Clean)
+        Command::Run { config } => {
+            let raw = config::Config::from_path(&config).context("failed to read config file")?;
+            let validated = raw.validate().context("failed to validate config")?;
+            run::run(validated).await
         }
         Command::Preflight => {
             preflight::run().await?;
