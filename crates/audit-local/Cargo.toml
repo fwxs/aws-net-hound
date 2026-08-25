@@ -16,7 +16,10 @@ path = "src/main.rs"
 
 [dependencies]
 aws_net_hound_core = { path = "../core", package = "core" }
+aws-credential-types = { workspace = true }
 aws-sdk-ec2 = { workspace = true }
+aws-sdk-sts = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 neo4rs = { workspace = true }
@@ -30,4 +33,5 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 aws-sdk-ec2 = { workspace = true, features = ["test-util"] }
 aws-smithy-mocks = { workspace = true }
+aws-smithy-types = { workspace = true }
 pretty_assertions = { workspace = true }
