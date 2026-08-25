@@ -10,6 +10,8 @@
 
 use std::process::Command;
 
+mod common;
+
 use audit_local::config::{Config, ValidatedConfig};
 use audit_local::run::run_with_ec2_client;
 use audit_local::Outcome;
@@ -125,6 +127,7 @@ async fn graph_counts(graph: &Graph) -> (i64, i64) {
 #[tokio::test]
 #[ignore]
 async fn run_against_empty_graph_applies_migrations_then_evaluates() {
+    let _lock = common::lock_compose_stack();
     let password = test_password();
     let _guard = ComposeGuard {
         password: password.clone(),
@@ -143,6 +146,7 @@ async fn run_against_empty_graph_applies_migrations_then_evaluates() {
 #[tokio::test]
 #[ignore]
 async fn run_twice_does_not_duplicate_graph_nodes() {
+    let _lock = common::lock_compose_stack();
     let password = test_password();
     let _guard = ComposeGuard {
         password: password.clone(),

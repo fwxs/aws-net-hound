@@ -5,6 +5,8 @@
 
 use std::process::Command;
 
+mod common;
+
 const COMPOSE_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// `preflight::run()` shells out to `docker compose`, which reads
@@ -45,6 +47,7 @@ impl Drop for ComposeGuard {
 #[tokio::test]
 #[ignore]
 async fn preflight_waits_for_healthy_container_then_returns_ok() {
+    let _lock = common::lock_compose_stack();
     let password = test_password();
     let _guard = ComposeGuard {
         password: password.clone(),
@@ -71,6 +74,7 @@ async fn preflight_waits_for_healthy_container_then_returns_ok() {
 #[tokio::test]
 #[ignore]
 async fn preflight_missing_service_returns_absent_error() {
+    let _lock = common::lock_compose_stack();
     let password = test_password();
     let _guard = ComposeGuard {
         password: password.clone(),
