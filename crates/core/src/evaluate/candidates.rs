@@ -170,7 +170,6 @@ fn route_exists(
     source_targets
         .iter()
         .any(|vpc_id| destination_targets.contains(vpc_id) || *vpc_id == destination.vpc_id)
-        || source_targets.contains(&destination.vpc_id)
 }
 
 async fn fetch_route_table_targets(
@@ -225,8 +224,8 @@ fn eni_from_row(row: &Row) -> Result<EniNode, CandidateAssemblyError> {
     let security_group_ids: Vec<String> = row
         .get("security_group_ids")
         .map_err(|source| CandidateAssemblyError::Deserialize { source })?;
-    let egress_rules = sg_rules_from_row(row, "egress_rules")?;
-    let ingress_rules = sg_rules_from_row(row, "ingress_rules")?;
+    let egress_rules = sg_rules_from_row(row, "egress_rules", Direction::Egress)?;
+    let ingress_rules = sg_rules_from_row(row, "ingress_rules", Direction::Ingress)?;
     let mut nacl_rules = nacl_rules_from_row(row)?;
     nacl_rules.sort_by_key(|rule| rule.rule_number);
 
@@ -249,6 +248,7 @@ fn eni_from_row(row: &Row) -> Result<EniNode, CandidateAssemblyError> {
 fn sg_rules_from_row(
     row: &Row,
     field: &'static str,
+    direction: Direction,
 ) -> Result<Vec<SgRule>, CandidateAssemblyError> {
     let raw: Vec<HashMap<String, neo4rs::BoltType>> = row
         .get(field)
@@ -256,12 +256,13 @@ fn sg_rules_from_row(
 
     raw.into_iter()
         .filter(|props| !props.is_empty())
-        .map(sg_rule_from_props)
+        .map(|props| sg_rule_from_props(props, direction))
         .collect()
 }
 
 fn sg_rule_from_props(
     props: HashMap<String, neo4rs::BoltType>,
+    direction: Direction,
 ) -> Result<SgRule, CandidateAssemblyError> {
     let protocol = bolt_string(&props, "protocol")?;
     let from_port = bolt_opt_u16(&props, "from_port");
@@ -298,11 +299,10 @@ fn sg_rule_from_props(
 
     Ok(SgRule {
         // `direction` selects the edge type, not a persisted property, so
-        // it can't be read back — see `schema.md`'s struct-to-property
-        // crosswalk. Both `source_endpoint`/`destination_endpoint` only use
-        // whichever of `egress_rules`/`ingress_rules` matches the direction
-        // they need, so the value here is never consulted.
-        direction: Direction::Egress,
+        // it can't be read back from `props` itself — see `schema.md`'s
+        // struct-to-property crosswalk. The caller supplies it based on
+        // which field (`egress_rules`/`ingress_rules`) this row came from.
+        direction,
         protocol,
         port_range,
         target,
@@ -324,7 +324,11 @@ fn nacl_rules_from_row(row: &Row) -> Result<Vec<NaclRule>, CandidateAssemblyErro
 fn nacl_rule_from_props(
     props: HashMap<String, neo4rs::BoltType>,
 ) -> Result<NaclRule, CandidateAssemblyError> {
-    let rule_number = bolt_i64(&props, "rule_number")? as u16;
+    let rule_number = u16::try_from(bolt_i64(&props, "rule_number")?).map_err(|_| {
+        CandidateAssemblyError::MalformedRow {
+            field: "rule_number",
+        }
+    })?;
     let direction = match bolt_string(&props, "direction")?.as_str() {
         "ingress" => Direction::Ingress,
         "egress" => Direction::Egress,
