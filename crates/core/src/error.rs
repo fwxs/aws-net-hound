@@ -205,6 +205,33 @@ pub enum IngestError {
     },
 }
 
+/// Errors that can occur while assembling [`crate::evaluate::PathCandidate`]s
+/// from the graph (see [`crate::evaluate::candidates::assemble_candidates`]).
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CandidateAssemblyError {
+    /// The Cypher query itself failed (transport, syntax, driver error).
+    #[error("failed to query the graph while assembling candidates: {source}")]
+    Query {
+        #[source]
+        source: neo4rs::Error,
+    },
+
+    /// A returned row could not be deserialized into the expected shape.
+    #[error("failed to deserialize a graph row while assembling candidates: {source}")]
+    Deserialize {
+        #[source]
+        source: neo4rs::DeError,
+    },
+
+    /// A row's `field` had a value that doesn't match the schema this
+    /// module expects (e.g. an unrecognized `target_kind`, or a
+    /// missing/wrong-typed property that should always be present per
+    /// `crates/core/docs/schema.md`).
+    #[error("malformed graph row while assembling candidates: field `{field}` is invalid")]
+    MalformedRow { field: &'static str },
+}
+
 /// Errors raised while mapping `aws_sdk_ec2::types::*` values into
 /// `core::domain` types (see [`crate::ingest::map`]).
 ///

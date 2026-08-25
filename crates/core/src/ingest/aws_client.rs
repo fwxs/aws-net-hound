@@ -60,9 +60,12 @@ pub async fn build_ec2_client(config: &IngestConfig) -> Result<aws_sdk_ec2::Clie
 
 /// Resolves the region and builds the shared [`SdkConfig`] every AWS client
 /// this milestone constructs (EC2, STS) is built from, so region and retry
-/// behaviour cannot diverge between them. Not `pub`: callers outside this
-/// crate only ever need a concrete client, never the raw SDK config.
-pub(crate) async fn build_sdk_config(config: &IngestConfig) -> Result<SdkConfig, IngestError> {
+/// behaviour cannot diverge between them. `pub` (not `pub(crate)`): M3-T5's
+/// `audit-local::run` needs the resolved account id (see
+/// [`resolve_account_id`]) alongside the EC2 client `run_full_ingest`
+/// already builds internally, and duplicating region resolution there would
+/// let the two diverge — reusing this is the smaller, correct surface.
+pub async fn build_sdk_config(config: &IngestConfig) -> Result<SdkConfig, IngestError> {
     let profile_region = ProfileFileRegionProvider::builder().build().region().await;
 
     build_sdk_config_from_sources(
@@ -115,7 +118,10 @@ async fn build_sdk_config_from_sources(
 /// `crate::ingest::map::topology::build_graph_batch`. Fatal on failure: a
 /// graph with no reliable `account_id` cannot be trusted for a boundary
 /// audit, so this is never downgraded to a warning.
-pub(crate) async fn resolve_account_id(sdk_config: &SdkConfig) -> Result<String, IngestError> {
+///
+/// `pub`: see [`build_sdk_config`]'s doc comment — `audit-local::run` needs
+/// this account id for the `RegulatedBoundary` it upserts before ingestion.
+pub async fn resolve_account_id(sdk_config: &SdkConfig) -> Result<String, IngestError> {
     let client = aws_sdk_sts::Client::new(sdk_config);
     let identity = client
         .get_caller_identity()

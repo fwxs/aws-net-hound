@@ -155,8 +155,11 @@ name = "audit-local"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-ec2",
+ "aws-smithy-mocks",
  "clap",
  "core",
+ "neo4rs",
  "pretty_assertions",
  "serde",
  "serde_norway",

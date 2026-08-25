@@ -25,3 +25,6 @@ graphify-out/
 
 # Local Neo4j credentials, never commit
 crates/audit-local/.env
+
+# Cross-process lock file for Docker-gated integration tests
+crates/audit-local/.compose.lock

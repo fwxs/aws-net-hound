@@ -8,11 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::domain::rule::PortRange;
 use crate::error::EvaluationError;
 
+pub mod candidates;
 pub mod engine;
 pub mod nacl;
 pub mod path;
 pub mod sg;
 
+pub use candidates::{assemble_candidates, BoundarySelectors};
 pub use engine::RuleIntersectionEvaluator;
 pub use path::{EndpointCandidate, EvaluationLayer, EvaluationStep, PathCandidate, PathEvidence};
 
