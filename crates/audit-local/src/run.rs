@@ -76,7 +76,10 @@ pub async fn run_with_ec2_client(
 
     info!(stage = "boundary", "starting");
     let boundary_start = Instant::now();
-    let boundary_id = boundary_id(account_id);
+    // `BoundaryConfig` carries no operator-assigned id/name/regime today
+    // (only selector lists) — this is a placeholder pending a config schema
+    // addition.
+    let boundary_id = format!("boundary-{account_id}");
     let boundary = RegulatedBoundaryRecord {
         id: boundary_id.clone(),
         account_id: account_id.to_string(),
@@ -154,14 +157,6 @@ pub async fn run_with_ec2_client(
     );
 
     Ok(findings_to_outcome(&findings))
-}
-
-/// Derives a stable `RegulatedBoundary.id` from the account id. `BoundaryConfig`
-/// carries no operator-assigned id/name/regime today (only selector lists) —
-/// this is a placeholder pending a config schema addition; see the plan's
-/// open items.
-fn boundary_id(account_id: &str) -> String {
-    format!("boundary-{account_id}")
 }
 
 async fn connect(config: &ValidatedConfig) -> anyhow::Result<Graph> {

@@ -103,31 +103,22 @@ fn empty_ec2_client() -> Client {
     aws_smithy_mocks::mock_client!(aws_sdk_ec2, aws_smithy_mocks::RuleMode::MatchAny, rules)
 }
 
+async fn count_query(graph: &Graph, cypher: &str) -> i64 {
+    graph
+        .execute(query(cypher))
+        .await
+        .expect("count query runs")
+        .next()
+        .await
+        .expect("count row present")
+        .expect("count row present")
+        .get("count")
+        .expect("count field present")
+}
+
 async fn graph_counts(graph: &Graph) -> (i64, i64) {
-    let mut node_stream = graph
-        .execute(query("MATCH (n) RETURN count(n) AS count"))
-        .await
-        .expect("node count query runs");
-    let node_count: i64 = node_stream
-        .next()
-        .await
-        .expect("node count row present")
-        .expect("node count row present")
-        .get("count")
-        .expect("count field present");
-
-    let mut edge_stream = graph
-        .execute(query("MATCH ()-[r]->() RETURN count(r) AS count"))
-        .await
-        .expect("edge count query runs");
-    let edge_count: i64 = edge_stream
-        .next()
-        .await
-        .expect("edge count row present")
-        .expect("edge count row present")
-        .get("count")
-        .expect("count field present");
-
+    let node_count = count_query(graph, "MATCH (n) RETURN count(n) AS count").await;
+    let edge_count = count_query(graph, "MATCH ()-[r]->() RETURN count(r) AS count").await;
     (node_count, edge_count)
 }
 
