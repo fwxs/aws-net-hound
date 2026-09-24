@@ -155,8 +155,12 @@ name = "audit-local"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-credential-types",
  "aws-sdk-ec2",
+ "aws-sdk-sts",
  "aws-smithy-mocks",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
  "clap",
  "core",
  "neo4rs",

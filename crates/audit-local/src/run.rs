@@ -22,6 +22,7 @@ use aws_net_hound_core::ports::{Evaluator, GraphWriter, RegulatedBoundaryRecord}
 use neo4rs::{ConfigBuilder, Graph};
 use tracing::{info, warn};
 
+use crate::aws_error::classify;
 use crate::config::ValidatedConfig;
 use crate::{preflight, Outcome};
 
@@ -37,9 +38,11 @@ pub async fn run(config: ValidatedConfig) -> anyhow::Result<Outcome> {
     };
     let sdk_config = build_sdk_config(&ingest_config)
         .await
+        .map_err(|source| classify("BuildSdkConfig", anyhow::Error::new(source)))
         .context("stage: ingest")?;
     let account_id = resolve_account_id(&sdk_config)
         .await
+        .map_err(|source| classify("GetCallerIdentity", anyhow::Error::new(source)))
         .context("stage: ingest")?;
     let client = aws_sdk_ec2::Client::new(&sdk_config);
 
@@ -106,6 +109,13 @@ pub async fn run_with_ec2_client(
     info!(stage = "ingest", "starting");
     let report = run_full_ingest_with_client(client, account_id, &writer)
         .await
+        .map_err(|source| {
+            let operation = match &source {
+                aws_net_hound_core::error::IngestError::Describe { operation, .. } => *operation,
+                _ => "ingest",
+            };
+            classify(operation, anyhow::Error::new(source))
+        })
         .context("stage: ingest")?;
     if report.unresolved_references > 0 {
         warn!(
