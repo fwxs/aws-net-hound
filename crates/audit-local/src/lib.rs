@@ -12,6 +12,7 @@ pub mod aws_error;
 pub mod config;
 pub mod preflight;
 pub mod run;
+pub mod summary;
 
 /// `audit-local` command-line interface.
 #[derive(Debug, Parser)]
