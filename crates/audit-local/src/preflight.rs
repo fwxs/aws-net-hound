@@ -14,6 +14,11 @@ use tokio::process::Command;
 use tokio::time::Instant;
 use tracing::info;
 
+/// Bolt endpoint the compose stack publishes (see docker-compose.yml).
+pub const NEO4J_BOLT_URI: &str = "bolt://127.0.0.1:7687";
+/// Neo4j Browser endpoint the compose stack publishes.
+pub const NEO4J_BROWSER_URL: &str = "http://127.0.0.1:7474";
+
 /// Poll interval while waiting for the `neo4j` service to become healthy.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Total time budget for the wait before giving up. Comfortably above the
@@ -169,14 +174,11 @@ async fn wait_for_healthy() -> Result<(), PreflightError> {
 }
 
 /// Run the full preflight check: Docker available, then `neo4j` healthy.
-/// On success, prints the Bolt URI and Neo4j Browser URL to stdout.
+/// Writes nothing: `run` calls this mid-run, and stdout there belongs to
+/// the run summary alone. The `preflight` subcommand prints the endpoints.
 pub async fn run() -> Result<(), PreflightError> {
     check_docker_available().await?;
     wait_for_healthy().await?;
-
-    println!("neo4j is healthy");
-    println!("Bolt URI: bolt://127.0.0.1:7687");
-    println!("Neo4j Browser: http://127.0.0.1:7474");
 
     Ok(())
 }
