@@ -75,7 +75,7 @@ pub async fn dispatch(command: Command) -> anyhow::Result<Outcome> {
         Command::Run { config } => {
             let raw = config::Config::from_path(&config).context("failed to read config file")?;
             let validated = raw.validate().context("failed to validate config")?;
-            run::run(validated).await
+            Ok(run::run(validated).await?.outcome)
         }
         Command::Preflight => {
             preflight::run().await?;
