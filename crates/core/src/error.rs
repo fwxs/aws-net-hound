@@ -1,5 +1,5 @@
-//! Error types for the migration runner, the `ports` trait contracts, and
-//! ingestion.
+//! Error types for the migration runner, the `ports` trait contracts,
+//! ingestion, and report output.
 
 use thiserror::Error;
 
@@ -256,5 +256,24 @@ pub enum MappingError {
         field: &'static str,
         /// Human-readable reason the field could not be mapped.
         reason: String,
+    },
+}
+
+/// Errors that can occur while exporting an [`crate::report::AuditReport`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ReportError {
+    /// The report could not be serialized into the requested format.
+    #[error("failed to serialize the audit report: {source}")]
+    Serialize {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// Writing the serialized report to its destination failed.
+    #[error("failed to write the audit report: {source}")]
+    Write {
+        #[source]
+        source: std::io::Error,
     },
 }
