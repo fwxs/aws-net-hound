@@ -9,3 +9,4 @@ pub mod graph;
 pub mod ingest;
 pub mod migrations;
 pub mod ports;
+pub mod report;
