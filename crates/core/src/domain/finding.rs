@@ -66,6 +66,11 @@ pub enum Reachability {
 pub struct ReachabilityFinding {
     /// UTC timestamp, ISO-8601 (RFC 3339), of when this finding was
     /// computed.
+    ///
+    /// Verdict time: when the verdict was established. Every per-finding
+    /// timestamp in a report is this field. Not to be confused with
+    /// [`crate::report::ReportSummary::generated_at`], the render time of
+    /// the whole report.
     pub computed_at: String,
     /// Unique key of the source node the reachability check started from
     /// (e.g. an `ENI` id).
