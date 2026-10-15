@@ -26,10 +26,19 @@ use crate::aws_error::classify;
 use crate::config::ValidatedConfig;
 use crate::{preflight, Outcome};
 
+/// What a completed run produced: the exit-code [`Outcome`] plus every
+/// evaluated finding (including `NotReachable`), so callers can render more
+/// than the counts `Outcome` carries.
+#[derive(Debug)]
+pub struct RunReport {
+    pub outcome: Outcome,
+    pub findings: Vec<ReachabilityFinding>,
+}
+
 /// Runs the full audit pipeline against an already-validated config,
 /// building a real AWS EC2 client and resolving the calling account id
 /// before delegating every other stage to [`run_with_ec2_client`].
-pub async fn run(config: ValidatedConfig) -> anyhow::Result<Outcome> {
+pub async fn run(config: ValidatedConfig) -> anyhow::Result<RunReport> {
     preflight::run().await.context("stage: preflight")?;
 
     let ingest_config = IngestConfig {
@@ -59,7 +68,7 @@ pub async fn run_with_ec2_client(
     config: ValidatedConfig,
     client: &aws_sdk_ec2::Client,
     account_id: &str,
-) -> anyhow::Result<Outcome> {
+) -> anyhow::Result<RunReport> {
     let graph = connect(&config).await.context("stage: connect")?;
 
     info!(stage = "migrate", "starting");
@@ -166,7 +175,10 @@ pub async fn run_with_ec2_client(
         "completed"
     );
 
-    Ok(findings_to_outcome(&findings))
+    Ok(RunReport {
+        outcome: findings_to_outcome(&findings),
+        findings,
+    })
 }
 
 async fn connect(config: &ValidatedConfig) -> anyhow::Result<Graph> {

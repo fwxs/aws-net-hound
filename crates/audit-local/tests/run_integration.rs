@@ -136,11 +136,11 @@ async fn run_against_empty_graph_applies_migrations_then_evaluates() {
     compose_up(&password);
 
     let client = empty_ec2_client();
-    let outcome = run_with_ec2_client(validated_config(), &client, ACCOUNT_ID)
+    let report = run_with_ec2_client(validated_config(), &client, ACCOUNT_ID)
         .await
         .expect("run succeeds against an empty account");
 
-    assert_eq!(outcome, Outcome::Clean);
+    assert_eq!(report.outcome, Outcome::Clean);
 }
 
 #[tokio::test]
