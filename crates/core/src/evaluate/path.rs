@@ -76,7 +76,11 @@ pub struct PathCandidate {
 /// One of the four rule layers an [`EvaluationStep`] can be evaluated
 /// against, in the order a full (non-short-circuited) evaluation consults
 /// them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Ord` is derived from declaration order, which is evaluation order, and
+/// pinned by `tests::evaluation_layer_ord_ranks_in_evaluation_order`. A new
+/// variant must be inserted at its position in the evaluation sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvaluationLayer {
     /// [`PathCandidate::source`]'s security group egress rules.
@@ -221,5 +225,28 @@ mod tests {
         // Assert
         assert_eq!(roundtripped, candidate);
         assert!(!roundtripped.source.security_group_rules[0].resolved);
+    }
+
+    #[test]
+    fn evaluation_layer_ord_ranks_in_evaluation_order() {
+        // Arrange
+        let evaluation_order = [
+            EvaluationLayer::SgEgress,
+            EvaluationLayer::NaclEgress,
+            EvaluationLayer::NaclIngress,
+            EvaluationLayer::SgIngress,
+        ];
+        let mut shuffled = [
+            EvaluationLayer::SgIngress,
+            EvaluationLayer::SgEgress,
+            EvaluationLayer::NaclIngress,
+            EvaluationLayer::NaclEgress,
+        ];
+
+        // Act
+        shuffled.sort();
+
+        // Assert
+        assert_eq!(shuffled, evaluation_order);
     }
 }
