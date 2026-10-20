@@ -1,5 +1,5 @@
-//! Error types for the migration runner, the `ports` trait contracts, and
-//! ingestion.
+//! Error types for the migration runner, the `ports` trait contracts,
+//! ingestion, and report output.
 
 use thiserror::Error;
 
@@ -256,5 +256,76 @@ pub enum MappingError {
         field: &'static str,
         /// Human-readable reason the field could not be mapped.
         reason: String,
+    },
+}
+
+/// Errors that can occur while exporting an [`crate::report::AuditReport`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ReportError {
+    /// The report could not be serialized as JSON.
+    ///
+    /// Named for the format rather than the action: another export format
+    /// adds its own variant instead of reusing this one.
+    #[error("failed to serialize the audit report as JSON: {source}")]
+    Json {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// Writing the serialized report to its destination failed.
+    #[error("failed to write the audit report: {source}")]
+    Write {
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Errors raised when a [`crate::report::AuditReport`] or one of its parts
+/// would break a model invariant, whether built in code or deserialized.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ReportModelError {
+    /// A finding was placed in a population its own `reachability` does not
+    /// belong to.
+    #[error(
+        "finding from `{finding_source}` is {actual} but was placed in the {population} \
+         population"
+    )]
+    ReachabilityMismatch {
+        /// The population the finding was placed in, e.g. `"reachable"`.
+        population: &'static str,
+        /// What the finding's own `reachability` says it is.
+        actual: &'static str,
+        /// `ReachabilityFinding::source` of the offending finding.
+        finding_source: String,
+    },
+
+    /// The causes of an indeterminate finding do not cover exactly the layers
+    /// its `reachability` lists.
+    #[error("causes of indeterminate finding from `{finding_source}` do not match its layers")]
+    CauseLayerMismatch {
+        /// `ReachabilityFinding::source` of the offending finding.
+        finding_source: String,
+    },
+
+    /// A declared count disagrees with the number of findings present.
+    #[error("report declares {declared} {population} findings but holds {actual}")]
+    CountsMismatch {
+        /// The population whose count is wrong, e.g. `"reachable"`.
+        population: &'static str,
+        /// The count stored in the report.
+        declared: usize,
+        /// The number of findings actually present.
+        actual: usize,
+    },
+
+    /// A report scope listed no accounts or no regions.
+    ///
+    /// An empty scope would yield a clean-looking report that audited nothing.
+    #[error("report scope has no {field}")]
+    EmptyScope {
+        /// Which list was empty: `"accounts"` or `"regions"`.
+        field: &'static str,
     },
 }
