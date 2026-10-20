@@ -11,7 +11,8 @@ async fn main() {
         .init();
 
     let cli = audit_local::Cli::parse();
-    let code = match audit_local::dispatch(cli.command).await {
+    // `Stdout` locks per write, so no guard is held across the run's awaits.
+    let code = match audit_local::dispatch(cli.command, &mut std::io::stdout()).await {
         Ok(outcome) => outcome.exit_code(),
         Err(err) => {
             tracing::error!("{err:#}");

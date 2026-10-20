@@ -3,6 +3,7 @@
 //! initializes tracing, dispatches here, and maps the result to a process
 //! exit code.
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -12,6 +13,7 @@ pub mod aws_error;
 pub mod config;
 pub mod preflight;
 pub mod run;
+pub mod summary;
 
 /// `audit-local` command-line interface.
 #[derive(Debug, Parser)]
@@ -69,16 +71,32 @@ impl Outcome {
     }
 }
 
-/// Dispatch a parsed [`Command`] to its implementation.
-pub async fn dispatch(command: Command) -> anyhow::Result<Outcome> {
+/// Dispatch a parsed [`Command`] to its implementation. Everything meant
+/// for the operator's stdout is written to `out`; diagnostics stay on
+/// tracing (stderr).
+pub async fn dispatch(command: Command, out: &mut impl Write) -> anyhow::Result<Outcome> {
     match command {
         Command::Run { config } => {
             let raw = config::Config::from_path(&config).context("failed to read config file")?;
             let validated = raw.validate().context("failed to validate config")?;
-            run::run(validated).await
+            let report = run::run(validated).await?;
+            writeln!(
+                out,
+                "{}",
+                summary::render_summary(&report.findings, preflight::NEO4J_BROWSER_URL)
+            )
+            .context("failed to write summary to stdout")?;
+            Ok(report.outcome)
         }
         Command::Preflight => {
             preflight::run().await?;
+            writeln!(
+                out,
+                "neo4j is healthy\nBolt URI: {}\nNeo4j Browser: {}",
+                preflight::NEO4J_BOLT_URI,
+                preflight::NEO4J_BROWSER_URL
+            )
+            .context("failed to write preflight result to stdout")?;
             Ok(Outcome::Clean)
         }
     }
